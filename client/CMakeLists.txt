@@ -1,0 +1,10 @@
+add_executable(chat_client
+    chat_client.cc
+)
+target_link_libraries(chat_client
+    chat_proto
+    muduo_net
+    muduo_base
+    ${PROTOBUF_LIBRARY}
+    pthread
+)

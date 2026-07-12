@@ -1,0 +1,27 @@
+# ─── 编译产物 ───
+build/
+build*/
+release-cpp11/
+release-install-cpp11/
+
+# ─── Protobuf 生成文件（由 protoc 生成，不要入库）──
+proto/*.pb.cc
+proto/*.pb.h
+
+# ─── 第三方库：muduo 作为 git submodule 管理 ───
+muduo/
+
+# ─── 编辑器 / 系统垃圾 ───
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── 核心转储 ───
+core
+core.*
+*.core
+
+# ─── 本地日志 ───
+*.log

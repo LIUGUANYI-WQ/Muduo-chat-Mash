@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+package chat;
+
+message LoginRequest {
+    string uid = 1;
+    string passwd = 2;
+    string token = 3;
+}
+
+message LoginResponse {
+    bool ok = 1;
+    string token = 2;
+    string reason = 3;
+    uint64 server_time = 4;
+}
+
+message LogoutRequest {
+    string uid = 1;
+    string token = 2;
+}
+
+message ChatMessage {
+    string from = 1;
+    string to = 2;
+    string room = 3;
+    string content = 4;
+    uint64 msg_id = 5;
+    uint64 seq = 6;
+    uint64 timestamp = 7;
+    bool recalled = 8;
+}
+
+message CreateRoom {
+    string name = 1;
+    string creator = 2;
+}
+
+message JoinRoom {
+    string room_name = 1;
+    string uid = 2;
+}
+
+message FriendRequest {
+    string from_uid = 1;
+    string to_uid = 2;
+    string message = 3;
+}
+
+message FriendResponse {
+    string from_uid = 1;
+    string to_uid = 2;
+    bool accepted = 3;
+}
+
+message FriendRemove {
+    string target_uid = 1;
+}
+
+message FriendInfo {
+    string uid = 1;
+    string nickname = 2;
+    bool online = 3;
+}
+
+message FriendList {
+    repeated FriendInfo friends = 1;
+}
+
+message RecallMessage {
+    uint64 msg_id = 1;
+    string from_uid = 2;
+    string room = 3;
+    string to_uid = 4;
+}
+
+message RecallNotify {
+    uint64 msg_id = 1;
+    string from_uid = 2;
+    string room = 3;
+    string to_uid = 4;
+    uint64 recall_time = 5;
+}
+
+message Heartbeat {
+    uint64 timestamp = 1;
+}
+
+message ErrorResponse {
+    uint32 code = 1;
+    string reason = 2;
+}
+
+message Envelope {
+    string token = 1;
+    oneof payload {
+        LoginRequest login_req = 10;
+        LogoutRequest logout_req = 11;
+        ChatMessage chat_msg = 20;
+        CreateRoom create_room = 21;
+        JoinRoom join_room = 22;
+        FriendRequest friend_req = 30;
+        FriendResponse friend_resp = 31;
+        FriendRemove friend_remove = 32;
+        RecallMessage recall_msg = 40;
+        Heartbeat heartbeat = 50;
+    }
+}
+
+message ServerMessage {
+    oneof payload {
+        LoginResponse login_resp = 10;
+        ChatMessage chat_msg = 20;
+        RecallNotify recall_notify = 40;
+        FriendRequest friend_req = 30;
+        FriendResponse friend_resp = 31;
+        FriendList friend_list = 33;
+        FriendRemove friend_remove = 32;
+        ErrorResponse error = 99;
+    }
+}
