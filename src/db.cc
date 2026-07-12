@@ -1,39 +1,52 @@
 #include "src/db.h"
 #include <cstdio>
-#include <mutex>
 
-MySQL::MySQL() : conn_(nullptr) {}
-
-MySQL::~MySQL() {
-    if (conn_) {
-        mysql_close(conn_);
+MySQLPool::~MySQLPool() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (MYSQL* conn : conns_) {
+        if (conn) mysql_close(conn);
     }
 }
 
-bool MySQL::init(const std::string& host, const std::string& user,
-                 const std::string& password, const std::string& database) {
-    conn_ = mysql_init(nullptr);
-    if (!conn_) {
-        fprintf(stderr, "mysql_init failed\n");
-        return false;
+bool MySQLPool::init(const std::string& host, int port,
+                     const std::string& user, const std::string& password,
+                     const std::string& database, int poolSize) {
+    host_ = host;
+    port_ = port;
+    user_ = user;
+    password_ = password;
+    database_ = database;
+
+    for (int i = 0; i < poolSize; ++i) {
+        MYSQL* conn = mysql_init(nullptr);
+        if (!conn) {
+            fprintf(stderr, "mysql_init failed for pool slot %d\n", i);
+            return false;
+        }
+
+        if (!mysql_real_connect(conn, host.c_str(), user.c_str(),
+                                password.c_str(), database.c_str(),
+                                port, nullptr, 0)) {
+            fprintf(stderr, "MySQL connect failed: %s\n", mysql_error(conn));
+            mysql_close(conn);
+            return false;
+        }
+
+        if (!ensureTable(conn)) {
+            mysql_close(conn);
+            return false;
+        }
+
+        conns_.push_back(conn);
+        idle_.push(conn);
     }
 
-    if (!mysql_real_connect(conn_, host.c_str(), user.c_str(),
-                            password.c_str(), database.c_str(),
-                            3306, nullptr, 0)) {
-        fprintf(stderr, "MySQL connect failed: %s\n", mysql_error(conn_));
-        mysql_close(conn_);
-        conn_ = nullptr;
-        return false;
-    }
-
-    fprintf(stdout, "MySQL connected to %s@%s/%s\n",
-            user.c_str(), host.c_str(), database.c_str());
-
-    return ensureTable();
+    fprintf(stdout, "MySQL pool connected: %d connections to %s@%s/%s\n",
+            poolSize, user.c_str(), host.c_str(), database.c_str());
+    return true;
 }
 
-bool MySQL::ensureTable() {
+bool MySQLPool::ensureTable(MYSQL* conn) {
     const char* sql =
         "CREATE TABLE IF NOT EXISTS users ("
         "  uid VARCHAR(64) PRIMARY KEY,"
@@ -41,61 +54,83 @@ bool MySQL::ensureTable() {
         "  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4";
 
-    if (mysql_query(conn_, sql)) {
-        fprintf(stderr, "Create table failed: %s\n", mysql_error(conn_));
+    if (mysql_query(conn, sql)) {
+        fprintf(stderr, "Create table failed: %s\n", mysql_error(conn));
         return false;
     }
     return true;
 }
 
-bool MySQL::registerUser(const std::string& uid, const std::string& passwd) {
+MYSQL* MySQLPool::getConnection() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cond_.wait(lock, [this] { return !idle_.empty(); });
+    MYSQL* conn = idle_.front();
+    idle_.pop();
+    return conn;
+}
+
+void MySQLPool::returnConnection(MYSQL* conn) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (userExists(uid)) {
+    idle_.push(conn);
+    cond_.notify_one();
+}
+
+bool MySQLPool::registerUser(const std::string& uid, const std::string& passwd) {
+    MYSQL* conn = getConnection();
+
+    std::string checkSql = "SELECT uid FROM users WHERE uid = '" + uid + "'";
+    if (mysql_query(conn, checkSql.c_str())) {
+        returnConnection(conn);
+        return false;
+    }
+    MYSQL_RES* result = mysql_store_result(conn);
+    bool exists = result && mysql_num_rows(result) > 0;
+    if (result) mysql_free_result(result);
+
+    if (exists) {
+        returnConnection(conn);
         return false;
     }
 
     std::string sql = "INSERT INTO users (uid, passwd) VALUES ('" + uid + "', SHA2('" + passwd + "', 256))";
-
-    if (mysql_query(conn_, sql.c_str())) {
-        fprintf(stderr, "Register failed: %s\n", mysql_error(conn_));
-        return false;
+    bool ok = (mysql_query(conn, sql.c_str()) == 0);
+    if (!ok) {
+        fprintf(stderr, "Register failed: %s\n", mysql_error(conn));
     }
-    return true;
-}
-
-bool MySQL::verifyUser(const std::string& uid, const std::string& passwd) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::string sql = "SELECT uid FROM users WHERE uid = '" + uid + "' AND passwd = SHA2('" + passwd + "', 256)";
-
-    if (mysql_query(conn_, sql.c_str())) {
-        fprintf(stderr, "Verify query failed: %s\n", mysql_error(conn_));
-        return false;
-    }
-
-    MYSQL_RES* result = mysql_store_result(conn_);
-    if (!result) {
-        fprintf(stderr, "Store result failed: %s\n", mysql_error(conn_));
-        return false;
-    }
-
-    bool ok = mysql_num_rows(result) > 0;
-    mysql_free_result(result);
+    returnConnection(conn);
     return ok;
 }
 
-bool MySQL::userExists(const std::string& uid) {
+bool MySQLPool::verifyUser(const std::string& uid, const std::string& passwd) {
+    MYSQL* conn = getConnection();
+
+    std::string sql = "SELECT uid FROM users WHERE uid = '" + uid + "' AND passwd = SHA2('" + passwd + "', 256)";
+    bool ok = false;
+    if (mysql_query(conn, sql.c_str()) == 0) {
+        MYSQL_RES* result = mysql_store_result(conn);
+        if (result) {
+            ok = mysql_num_rows(result) > 0;
+            mysql_free_result(result);
+        }
+    } else {
+        fprintf(stderr, "Verify query failed: %s\n", mysql_error(conn));
+    }
+    returnConnection(conn);
+    return ok;
+}
+
+bool MySQLPool::userExists(const std::string& uid) {
+    MYSQL* conn = getConnection();
+
     std::string sql = "SELECT uid FROM users WHERE uid = '" + uid + "'";
-
-    if (mysql_query(conn_, sql.c_str())) {
-        return false;
+    bool exists = false;
+    if (mysql_query(conn, sql.c_str()) == 0) {
+        MYSQL_RES* result = mysql_store_result(conn);
+        if (result) {
+            exists = mysql_num_rows(result) > 0;
+            mysql_free_result(result);
+        }
     }
-
-    MYSQL_RES* result = mysql_store_result(conn_);
-    if (!result) {
-        return false;
-    }
-
-    bool exists = mysql_num_rows(result) > 0;
-    mysql_free_result(result);
+    returnConnection(conn);
     return exists;
 }

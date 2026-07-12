@@ -1,13 +1,15 @@
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(MYSQL REQUIRED mysqlclient)
+pkg_check_modules(HIREDIS REQUIRED hiredis)
 
 add_executable(chat_server
     main.cc
     chat_server.cc
     codec.cc
     db.cc
+    redis.cc
 )
-target_include_directories(chat_server PRIVATE ${MYSQL_INCLUDE_DIRS})
+target_include_directories(chat_server PRIVATE ${MYSQL_INCLUDE_DIRS} ${HIREDIS_INCLUDE_DIRS})
 target_link_libraries(chat_server
     chat_proto
     muduo_net
@@ -15,5 +17,6 @@ target_link_libraries(chat_server
     muduo_protobuf_codec
     ${PROTOBUF_LIBRARY}
     ${MYSQL_LIBRARIES}
+    ${HIREDIS_LIBRARIES}
     pthread
 )

@@ -6,6 +6,7 @@
 #include "muduo/base/noncopyable.h"
 #include "src/codec.h"
 #include "src/db.h"
+#include "src/redis.h"
 #include "chat.pb.h"
 
 #include <map>
@@ -60,7 +61,8 @@ public:
     muduo::net::TcpServer server_;
     ChatCodec codec_;
     muduo::net::EventLoop* loop_;
-    MySQL db_;
+    MySQLPool db_;
+    RedisCache redis_;
 
     std::unordered_map<muduo::string, muduo::net::TcpConnectionPtr> users_;
     std::map<muduo::string, std::set<muduo::string>> rooms_;

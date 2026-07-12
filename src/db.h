@@ -3,23 +3,45 @@
 
 #include <string>
 #include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <vector>
+#include <functional>
 #include <mysql/mysql.h>
 
-class MySQL {
+class MySQLPool {
 public:
-    MySQL();
-    ~MySQL();
+    MySQLPool() = default;
+    ~MySQLPool();
 
-    bool init(const std::string& host, const std::string& user,
-              const std::string& password, const std::string& database);
+    bool init(const std::string& host, int port,
+              const std::string& user, const std::string& password,
+              const std::string& database, int poolSize);
+
     bool registerUser(const std::string& uid, const std::string& passwd);
     bool verifyUser(const std::string& uid, const std::string& passwd);
     bool userExists(const std::string& uid);
 
 private:
-    bool ensureTable();
-    MYSQL* conn_;
+    struct ConnWrapper {
+        MYSQL* conn;
+        bool inUse;
+    };
+
+    MYSQL* getConnection();
+    void returnConnection(MYSQL* conn);
+    bool ensureTable(MYSQL* conn);
+
+    std::string host_;
+    int port_;
+    std::string user_;
+    std::string password_;
+    std::string database_;
+
+    std::vector<MYSQL*> conns_;
+    std::queue<MYSQL*> idle_;
     std::mutex mutex_;
+    std::condition_variable cond_;
 };
 
 #endif

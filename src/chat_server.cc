@@ -20,14 +20,25 @@ ChatServer::ChatServer(EventLoop* loop, const InetAddress& listenAddr)
     const char* user = std::getenv("MYSQL_USER");
     const char* pass = std::getenv("MYSQL_PASSWORD");
     const char* db   = std::getenv("MYSQL_DATABASE");
+    const char* poolStr = std::getenv("MYSQL_POOL_SIZE");
 
     std::string s_host = host ? host : "127.0.0.1";
     std::string s_user = user ? user : "root";
     std::string s_pass = pass ? pass : "123456";
     std::string s_db   = db   ? db   : "chat";
+    int poolSize = poolStr ? atoi(poolStr) : 8;
 
-    if (!db_.init(s_host, s_user, s_pass, s_db)) {
-        LOG_FATAL << "MySQL init failed, check MYSQL_* env vars";
+    if (!db_.init(s_host, 3306, s_user, s_pass, s_db, poolSize)) {
+        LOG_FATAL << "MySQL pool init failed, check MYSQL_* env vars";
+    }
+
+    const char* redisHost = std::getenv("REDIS_HOST");
+    const char* redisPortStr = std::getenv("REDIS_PORT");
+    std::string s_redisHost = redisHost ? redisHost : "127.0.0.1";
+    int redisPort = redisPortStr ? atoi(redisPortStr) : 6379;
+
+    if (!redis_.init(s_redisHost, redisPort)) {
+        LOG_WARN << "Redis connect failed, running without cache";
     }
 
     server_.setConnectionCallback(
@@ -183,7 +194,20 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
         return;
     }
 
-    if (!db_.verifyUser(uid, req.passwd()))
+    bool userOk = false;
+
+    // 先查 Redis 缓存
+    bool cached = false;
+    if (redis_.getCachedUserAuth(uid, userOk)) {
+        cached = true;
+    } else {
+        // 缓存未命中，查 MySQL
+        userOk = db_.verifyUser(uid, req.passwd());
+        // 缓存结果（存在缓存5分钟）
+        redis_.cacheUserAuth(uid, userOk, 300);
+    }
+
+    if (!userOk)
     {
         sendError(conn, 6, "invalid uid or password");
         return;
