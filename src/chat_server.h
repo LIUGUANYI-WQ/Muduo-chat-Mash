@@ -19,6 +19,7 @@ public:
                const muduo::net::InetAddress& listenAddr);
 
     void start();
+    void setThreadNum(int numThreads) { server_.setThreadNum(numThreads); }
 
     struct Session {
         muduo::string uid;

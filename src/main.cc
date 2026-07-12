@@ -14,6 +14,7 @@ int main(int argc, char* argv[])
         uint16_t port = static_cast<uint16_t>(atoi(argv[1]));
         muduo::net::InetAddress listenAddr(port);
         ChatServer server(&loop, listenAddr);
+        server.setThreadNum(4);  // 4个I/O线程（1 main + 3 sub）
         server.start();
         loop.loop();
     }

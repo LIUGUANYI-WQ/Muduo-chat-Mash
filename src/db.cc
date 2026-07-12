@@ -1,5 +1,6 @@
 #include "src/db.h"
 #include <cstdio>
+#include <mutex>
 
 MySQL::MySQL() : conn_(nullptr) {}
 
@@ -48,6 +49,7 @@ bool MySQL::ensureTable() {
 }
 
 bool MySQL::registerUser(const std::string& uid, const std::string& passwd) {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (userExists(uid)) {
         return false;
     }
@@ -62,6 +64,7 @@ bool MySQL::registerUser(const std::string& uid, const std::string& passwd) {
 }
 
 bool MySQL::verifyUser(const std::string& uid, const std::string& passwd) {
+    std::lock_guard<std::mutex> lock(mutex_);
     std::string sql = "SELECT uid FROM users WHERE uid = '" + uid + "' AND passwd = SHA2('" + passwd + "', 256)";
 
     if (mysql_query(conn_, sql.c_str())) {

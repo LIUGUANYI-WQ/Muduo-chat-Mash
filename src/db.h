@@ -2,6 +2,7 @@
 #define MUDUO_CHAT_DB_H
 
 #include <string>
+#include <mutex>
 #include <mysql/mysql.h>
 
 class MySQL {
@@ -18,6 +19,7 @@ public:
 private:
     bool ensureTable();
     MYSQL* conn_;
+    std::mutex mutex_;
 };
 
 #endif
