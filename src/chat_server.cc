@@ -6,6 +6,7 @@
 #include <boost/any.hpp>
 #include <functional>
 #include <random>
+#include <cstdlib>
 
 using namespace muduo;
 using namespace muduo::net;
@@ -15,6 +16,20 @@ ChatServer::ChatServer(EventLoop* loop, const InetAddress& listenAddr)
       codec_(std::bind(&ChatServer::onEnvelope, this, _1, _2, _3)),
       loop_(loop)
 {
+    const char* host = std::getenv("MYSQL_HOST");
+    const char* user = std::getenv("MYSQL_USER");
+    const char* pass = std::getenv("MYSQL_PASSWORD");
+    const char* db   = std::getenv("MYSQL_DATABASE");
+
+    std::string s_host = host ? host : "127.0.0.1";
+    std::string s_user = user ? user : "root";
+    std::string s_pass = pass ? pass : "123456";
+    std::string s_db   = db   ? db   : "chat";
+
+    if (!db_.init(s_host, s_user, s_pass, s_db)) {
+        LOG_FATAL << "MySQL init failed, check MYSQL_* env vars";
+    }
+
     server_.setConnectionCallback(
         std::bind(&ChatServer::onConnection, this, _1));
     server_.setMessageCallback(
@@ -63,6 +78,9 @@ void ChatServer::onEnvelope(const TcpConnectionPtr& conn,
             break;
         case chat::Envelope::kLogoutReq:
             handleLogout(conn, env.logout_req());
+            break;
+        case chat::Envelope::kRegisterReq:
+            handleRegister(conn, env.register_req());
             break;
         case chat::Envelope::kChatMsg:
             handleChatMessage(conn, env.chat_msg());
@@ -165,6 +183,12 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
         return;
     }
 
+    if (!db_.verifyUser(uid, req.passwd()))
+    {
+        sendError(conn, 6, "invalid uid or password");
+        return;
+    }
+
     static thread_local std::mt19937 gen(std::random_device{}());
     static const char hex[] = "0123456789abcdef";
     std::uniform_int_distribution<> dis(0, 15);
@@ -198,7 +222,50 @@ void ChatServer::handleLogout(const TcpConnectionPtr& conn,
     users_.erase(uid);
     tokens_.erase(req.token());
     LOG_INFO << "User " << uid << " logged out";
-    conn->shutdown();
+
+    Session s;
+    s.uid = "";
+    s.authenticated = false;
+    conn->setContext(s);
+
+    chat::ServerMessage reply;
+    reply.mutable_login_resp()->set_ok(true);
+    reply.mutable_login_resp()->set_reason("logged out");
+    codec_.sendServerMessage(conn, reply);
+}
+
+void ChatServer::handleRegister(const TcpConnectionPtr& conn,
+                               const chat::RegisterRequest& req)
+{
+    if (req.uid().empty() || req.passwd().empty())
+    {
+        sendError(conn, 7, "uid and password required");
+        return;
+    }
+
+    if (db_.userExists(req.uid()))
+    {
+        chat::ServerMessage reply;
+        reply.mutable_register_resp()->set_ok(false);
+        reply.mutable_register_resp()->set_reason("user already exists");
+        codec_.sendServerMessage(conn, reply);
+        return;
+    }
+
+    if (!db_.registerUser(req.uid(), req.passwd()))
+    {
+        chat::ServerMessage reply;
+        reply.mutable_register_resp()->set_ok(false);
+        reply.mutable_register_resp()->set_reason("register failed");
+        codec_.sendServerMessage(conn, reply);
+        return;
+    }
+
+    LOG_INFO << "User " << req.uid() << " registered";
+
+    chat::ServerMessage reply;
+    reply.mutable_register_resp()->set_ok(true);
+    codec_.sendServerMessage(conn, reply);
 }
 
 void ChatServer::handleChatMessage(const TcpConnectionPtr& conn,

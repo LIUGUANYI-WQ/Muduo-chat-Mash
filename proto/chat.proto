@@ -15,6 +15,16 @@ message LoginResponse {
     uint64 server_time = 4;
 }
 
+message RegisterRequest {
+    string uid = 1;
+    string passwd = 2;
+}
+
+message RegisterResponse {
+    bool ok = 1;
+    string reason = 2;
+}
+
 message LogoutRequest {
     string uid = 1;
     string token = 2;
@@ -96,6 +106,7 @@ message Envelope {
     oneof payload {
         LoginRequest login_req = 10;
         LogoutRequest logout_req = 11;
+        RegisterRequest register_req = 12;
         ChatMessage chat_msg = 20;
         CreateRoom create_room = 21;
         JoinRoom join_room = 22;
@@ -110,6 +121,7 @@ message Envelope {
 message ServerMessage {
     oneof payload {
         LoginResponse login_resp = 10;
+        RegisterResponse register_resp = 12;
         ChatMessage chat_msg = 20;
         RecallNotify recall_notify = 40;
         FriendRequest friend_req = 30;

@@ -5,6 +5,7 @@
 #include "muduo/net/EventLoop.h"
 #include "muduo/base/noncopyable.h"
 #include "src/codec.h"
+#include "src/db.h"
 #include "chat.pb.h"
 
 #include <map>
@@ -35,6 +36,8 @@ public:
                      const chat::LoginRequest& req);
     void handleLogout(const muduo::net::TcpConnectionPtr& conn,
                       const chat::LogoutRequest& req);
+    void handleRegister(const muduo::net::TcpConnectionPtr& conn,
+                        const chat::RegisterRequest& req);
     void handleChatMessage(const muduo::net::TcpConnectionPtr& conn,
                            const chat::ChatMessage& msg);
     void handleCreateRoom(const muduo::net::TcpConnectionPtr& conn,
@@ -56,6 +59,7 @@ public:
     muduo::net::TcpServer server_;
     ChatCodec codec_;
     muduo::net::EventLoop* loop_;
+    MySQL db_;
 
     std::unordered_map<muduo::string, muduo::net::TcpConnectionPtr> users_;
     std::map<muduo::string, std::set<muduo::string>> rooms_;

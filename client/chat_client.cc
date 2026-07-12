@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <thread>
+#include <atomic>
+#include <string>
 
 using namespace muduo;
 using namespace muduo::net;
@@ -44,13 +46,107 @@ public:
     void quit() { loop_->quit(); }
     bool connected() const { return conn_ && conn_->connected(); }
 
-    // 所有连接访问都在 EventLoop 线程，线程安全
+    bool isLoggedIn() const { return loggedIn_; }
+    const std::string& currentUid() const { return currentUid_; }
+
     void sendEnvelope(const chat::Envelope& env)
     {
         loop_->runInLoop([this, env]() {
             if (conn_ && conn_->connected())
                 ::sendEnvelope(conn_, env);
         });
+    }
+
+    void sendRegister(const std::string& uid, const std::string& passwd)
+    {
+        chat::Envelope env;
+        auto req = env.mutable_register_req();
+        req->set_uid(uid);
+        req->set_passwd(passwd);
+        sendEnvelope(env);
+    }
+
+    void sendLogin(const std::string& uid, const std::string& passwd)
+    {
+        chat::Envelope env;
+        auto req = env.mutable_login_req();
+        req->set_uid(uid);
+        req->set_passwd(passwd);
+        sendEnvelope(env);
+    }
+
+    void sendPrivateMsg(const std::string& to, const std::string& content)
+    {
+        chat::Envelope env;
+        auto msg = env.mutable_chat_msg();
+        msg->set_to(to);
+        msg->set_content(content);
+        sendEnvelope(env);
+    }
+
+    void sendRoomMsg(const std::string& room, const std::string& content)
+    {
+        chat::Envelope env;
+        auto msg = env.mutable_chat_msg();
+        msg->set_room(room);
+        msg->set_content(content);
+        sendEnvelope(env);
+    }
+
+    void sendCreateRoom(const std::string& name)
+    {
+        chat::Envelope env;
+        auto req = env.mutable_create_room();
+        req->set_name(name);
+        sendEnvelope(env);
+    }
+
+    void sendJoinRoom(const std::string& room, const std::string& uid)
+    {
+        chat::Envelope env;
+        auto req = env.mutable_join_room();
+        req->set_room_name(room);
+        req->set_uid(uid);
+        sendEnvelope(env);
+    }
+
+    void sendFriendReq(const std::string& to, const std::string& msg)
+    {
+        chat::Envelope env;
+        auto req = env.mutable_friend_req();
+        req->set_to_uid(to);
+        req->set_message(msg);
+        sendEnvelope(env);
+    }
+
+    void sendFriendResp(const std::string& from, const std::string& to, bool accept)
+    {
+        chat::Envelope env;
+        auto resp = env.mutable_friend_resp();
+        resp->set_from_uid(from);
+        resp->set_to_uid(to);
+        resp->set_accepted(accept);
+        sendEnvelope(env);
+    }
+
+    void sendRecall(uint64_t msgId, const std::string& toUid, const std::string& room)
+    {
+        chat::Envelope env;
+        auto req = env.mutable_recall_msg();
+        req->set_msg_id(msgId);
+        req->set_to_uid(toUid);
+        req->set_room(room);
+        sendEnvelope(env);
+    }
+
+    void sendLogout()
+    {
+        chat::Envelope env;
+        auto req = env.mutable_logout_req();
+        req->set_uid(currentUid_);
+        sendEnvelope(env);
+        loggedIn_ = false;
+        currentUid_.clear();
     }
 
 private:
@@ -65,6 +161,8 @@ private:
         else
         {
             conn_.reset();
+            loggedIn_ = false;
+            currentUid_.clear();
             loop_->quit();
         }
     }
@@ -99,44 +197,69 @@ private:
                 switch (msg.payload_case())
                 {
                     case chat::ServerMessage::kLoginResp:
-                        printf("[login] ok=%d token=%s reason=%s\n",
+                        printf("\n[login] ok=%d token=%s reason=%s\n",
                                msg.login_resp().ok(),
                                msg.login_resp().token().c_str(),
                                msg.login_resp().reason().c_str());
+                        if (msg.login_resp().ok())
+                        {
+                            loggedIn_ = true;
+                        }
+                        printf("> ");
+                        fflush(stdout);
+                        break;
+                    case chat::ServerMessage::kRegisterResp:
+                        printf("\n[register] ok=%d reason=%s\n",
+                               msg.register_resp().ok(),
+                               msg.register_resp().reason().c_str());
+                        printf("> ");
+                        fflush(stdout);
                         break;
                     case chat::ServerMessage::kChatMsg:
                         if (!msg.chat_msg().room().empty())
-                            printf("[room:%s] %s: %s\n",
+                            printf("\n[room:%s] %s: %s\n",
                                    msg.chat_msg().room().c_str(),
                                    msg.chat_msg().from().c_str(),
                                    msg.chat_msg().content().c_str());
                         else
-                            printf("[private] %s -> me: %s\n",
+                            printf("\n[private] %s -> me: %s\n",
                                    msg.chat_msg().from().c_str(),
                                    msg.chat_msg().content().c_str());
+                        printf("> ");
+                        fflush(stdout);
                         break;
                     case chat::ServerMessage::kFriendReq:
-                        printf("[friend] request from: %s msg: %s\n",
+                        printf("\n[friend] request from: %s msg: %s\n",
                                msg.friend_req().from_uid().c_str(),
                                msg.friend_req().message().c_str());
+                        printf("> ");
+                        fflush(stdout);
                         break;
                     case chat::ServerMessage::kFriendResp:
-                        printf("[friend] response from: %s accepted: %d\n",
+                        printf("\n[friend] response from: %s accepted: %d\n",
                                msg.friend_resp().from_uid().c_str(),
                                msg.friend_resp().accepted());
+                        printf("> ");
+                        fflush(stdout);
                         break;
                     case chat::ServerMessage::kRecallNotify:
-                        printf("[recall] msg_id=%lu from=%s\n",
+                        printf("\n[recall] msg_id=%lu from=%s\n",
                                msg.recall_notify().msg_id(),
                                msg.recall_notify().from_uid().c_str());
+                        printf("> ");
+                        fflush(stdout);
                         break;
                     case chat::ServerMessage::kError:
-                        printf("[error] code=%d reason=%s\n",
+                        printf("\n[error] code=%d reason=%s\n",
                                msg.error().code(),
                                msg.error().reason().c_str());
+                        printf("> ");
+                        fflush(stdout);
                         break;
                     default:
-                        printf("[unknown server message]\n");
+                        printf("\n[unknown server message]\n");
+                        printf("> ");
+                        fflush(stdout);
                         break;
                 }
             }
@@ -148,20 +271,23 @@ private:
     EventLoop* loop_;
     TcpClient client_;
     TcpConnectionPtr conn_;
+    std::atomic<bool> loggedIn_{false};
+    std::string currentUid_;
 };
 
-static void printHelp()
+static std::string readLine(const char* prompt)
 {
-    printf("Commands:\n");
-    printf("  login <uid> [passwd]       login\n");
-    printf("  msg <to> <content>         private message\n");
-    printf("  room <name> <content>      room message\n");
-    printf("  createroom <name>          create room\n");
-    printf("  joinroom <room> <uid>      join room\n");
-    printf("  friendreq <uid> [msg]     friend request\n");
-    printf("  friendresp <uid> <to> <0|1>  friend response\n");
-    printf("  recall <msg_id>            recall message\n");
-    printf("  quit                       exit\n");
+    printf("%s", prompt);
+    fflush(stdout);
+    char line[1024] = {0};
+    if (fgets(line, sizeof line, stdin))
+    {
+        size_t len = strlen(line);
+        if (len > 0 && line[len-1] == '\n')
+            line[len-1] = '\0';
+        return line;
+    }
+    return "";
 }
 
 int main(int argc, char* argv[])
@@ -176,106 +302,174 @@ int main(int argc, char* argv[])
     InetAddress serverAddr(argv[1], atoi(argv[2]));
     ChatClient client(&loop, serverAddr);
     client.connect();
-    printHelp();
 
-    // stdin 在独立线程读，通过 sendEnvelope 的 runInLoop 线程安全投递
     std::thread stdinThread([&client, &loop]() {
-        char line[1024];
-        while (fgets(line, sizeof line, stdin))
+        // 等待连接建立
+        while (!client.connected())
+            usleep(10000);
+
+        bool running = true;
+        while (running)
         {
-            char cmd[256] = {0};
-            char rest[1024] = {0};
-            if (sscanf(line, "%255s %1023[^\n]", cmd, rest) < 1)
-                continue;
+            if (!client.isLoggedIn())
+            {
+                // ========== 认证阶段 ==========
+                printf("\n");
+                printf("╔══════════════════════════════╗\n");
+                printf("║        欢迎使用聊天系统      ║\n");
+                printf("╠══════════════════════════════╣\n");
+                printf("║  1. 登录                     ║\n");
+                printf("║  2. 注册                     ║\n");
+                printf("║  3. 退出                     ║\n");
+                printf("╚══════════════════════════════╝\n");
 
-            chat::Envelope env;
+                std::string choice = readLine("请选择: ");
 
-            if (strcmp(cmd, "login") == 0)
-            {
-                char uid[256] = {0};
-                char pwd[256] = {0};
-                sscanf(rest, "%255s %255s", uid, pwd);
-                auto req = env.mutable_login_req();
-                req->set_uid(uid);
-                req->set_passwd(pwd);
-            }
-            else if (strcmp(cmd, "msg") == 0)
-            {
-                char to[256] = {0};
-                char content[1024] = {0};
-                sscanf(rest, "%255s %1023[^\n]", to, content);
-                auto msg = env.mutable_chat_msg();
-                msg->set_to(to);
-                msg->set_content(content);
-            }
-            else if (strcmp(cmd, "room") == 0)
-            {
-                char name[256] = {0};
-                char content[1024] = {0};
-                sscanf(rest, "%255s %1023[^\n]", name, content);
-                auto msg = env.mutable_chat_msg();
-                msg->set_room(name);
-                msg->set_content(content);
-            }
-            else if (strcmp(cmd, "createroom") == 0)
-            {
-                char name[256] = {0};
-                sscanf(rest, "%255s", name);
-                auto req = env.mutable_create_room();
-                req->set_name(name);
-            }
-            else if (strcmp(cmd, "joinroom") == 0)
-            {
-                char room[256] = {0};
-                char uid[256] = {0};
-                sscanf(rest, "%255s %255s", room, uid);
-                auto req = env.mutable_join_room();
-                req->set_room_name(room);
-                req->set_uid(uid);
-            }
-            else if (strcmp(cmd, "friendreq") == 0)
-            {
-                char to[256] = {0};
-                char msg[1024] = {0};
-                sscanf(rest, "%255s %1023[^\n]", to, msg);
-                auto req = env.mutable_friend_req();
-                req->set_to_uid(to);
-                req->set_message(msg);
-            }
-            else if (strcmp(cmd, "friendresp") == 0)
-            {
-                char from[256] = {0};
-                char to[256] = {0};
-                int acc = 0;
-                sscanf(rest, "%255s %255s %d", from, to, &acc);
-                auto resp = env.mutable_friend_resp();
-                resp->set_from_uid(from);
-                resp->set_to_uid(to);
-                resp->set_accepted(acc != 0);
-            }
-            else if (strcmp(cmd, "recall") == 0)
-            {
-                char id[256] = {0};
-                sscanf(rest, "%255s", id);
-                auto req = env.mutable_recall_msg();
-                req->set_msg_id(strtoull(id, NULL, 10));
-            }
-            else if (strcmp(cmd, "quit") == 0)
-            {
-                client.quit();
-                break;
+                if (choice == "1")
+                {
+                    std::string uid = readLine("用户ID: ");
+                    std::string pwd = readLine("密码:   ");
+                    if (uid.empty() || pwd.empty())
+                    {
+                        printf("用户ID和密码不能为空\n");
+                        continue;
+                    }
+                    client.sendLogin(uid, pwd);
+                    usleep(200000); // 等待服务器响应
+                }
+                else if (choice == "2")
+                {
+                    std::string uid = readLine("用户ID: ");
+                    std::string pwd = readLine("密码:   ");
+                    if (uid.empty() || pwd.empty())
+                    {
+                        printf("用户ID和密码不能为空\n");
+                        continue;
+                    }
+                    client.sendRegister(uid, pwd);
+                    usleep(200000); // 等待服务器响应
+                }
+                else if (choice == "3")
+                {
+                    client.quit();
+                    running = false;
+                }
+                else
+                {
+                    printf("无效选择，请重试\n");
+                }
             }
             else
             {
-                printHelp();
-                continue;
-            }
+                // ========== 主功能阶段 ==========
+                printf("\n");
+                printf("╔══════════════════════════════╗\n");
+                printf("║        功能菜单              ║\n");
+                printf("╠══════════════════════════════╣\n");
+                printf("║  1. 私聊                     ║\n");
+                printf("║  2. 群聊                     ║\n");
+                printf("║  3. 创建群组                 ║\n");
+                printf("║  4. 加入群组                 ║\n");
+                printf("║  5. 添加好友                 ║\n");
+                printf("║  6. 好友回复                 ║\n");
+                printf("║  7. 撤回消息                 ║\n");
+                printf("║  8. 登出                     ║\n");
+                printf("╚══════════════════════════════╝\n");
 
-            client.sendEnvelope(env);
+                std::string choice = readLine("请选择: ");
+
+                if (choice == "1")
+                {
+                    std::string to = readLine("发送给谁: ");
+                    std::string content = readLine("消息内容: ");
+                    if (to.empty() || content.empty())
+                    {
+                        printf("用户ID和内容不能为空\n");
+                        continue;
+                    }
+                    client.sendPrivateMsg(to, content);
+                }
+                else if (choice == "2")
+                {
+                    std::string room = readLine("群组名称: ");
+                    std::string content = readLine("消息内容: ");
+                    if (room.empty() || content.empty())
+                    {
+                        printf("群组名和内容不能为空\n");
+                        continue;
+                    }
+                    client.sendRoomMsg(room, content);
+                }
+                else if (choice == "3")
+                {
+                    std::string name = readLine("群组名称: ");
+                    if (name.empty())
+                    {
+                        printf("群组名不能为空\n");
+                        continue;
+                    }
+                    client.sendCreateRoom(name);
+                }
+                else if (choice == "4")
+                {
+                    std::string room = readLine("群组名称: ");
+                    std::string uid = readLine("你的ID: ");
+                    if (room.empty() || uid.empty())
+                    {
+                        printf("群组名和ID不能为空\n");
+                        continue;
+                    }
+                    client.sendJoinRoom(room, uid);
+                }
+                else if (choice == "5")
+                {
+                    std::string to = readLine("好友ID: ");
+                    std::string msg = readLine("验证消息: ");
+                    if (to.empty())
+                    {
+                        printf("好友ID不能为空\n");
+                        continue;
+                    }
+                    client.sendFriendReq(to, msg);
+                }
+                else if (choice == "6")
+                {
+                    std::string from = readLine("好友ID: ");
+                    std::string to = readLine("你的ID: ");
+                    std::string accept = readLine("同意? (1=是/0=否): ");
+                    if (from.empty() || to.empty())
+                    {
+                        printf("ID不能为空\n");
+                        continue;
+                    }
+                    client.sendFriendResp(from, to, accept == "1");
+                }
+                else if (choice == "7")
+                {
+                    std::string idStr = readLine("消息ID: ");
+                    std::string to = readLine("对方ID (私聊) 或留空: ");
+                    std::string room = readLine("群组名 (群聊) 或留空: ");
+                    if (idStr.empty())
+                    {
+                        printf("消息ID不能为空\n");
+                        continue;
+                    }
+                    client.sendRecall(strtoull(idStr.c_str(), NULL, 10), to, room);
+                }
+                else if (choice == "8")
+                {
+                    client.sendLogout();
+                    printf("已登出\n");
+                }
+                else
+                {
+                    printf("无效选择，请重试\n");
+                }
+            }
         }
-        client.quit();
     });
 
     loop.loop();
     stdinThread.join();
+    return 0;
 }

@@ -1,6 +1,59 @@
 # Dev Log
 
 > 记录开发过程中遇到的问题、排查思路与结论。新条目加在顶部。
+> 所有截图统一存放在 `image_question_bug/` 目录。
+
+---
+
+## BUG #3：登出后关闭连接但 stdinThread 仍在运行
+
+### 现象
+客户端选择登出后，服务端日志显示 `is DOWN`（连接断开），但客户端的 stdinThread 还在跑，
+回到认证菜单，再登录失败（连接已断）。
+
+### 根因
+`handleLogout` 里调用 `conn->shutdown()` 直接关闭了 TCP 连接，
+但客户端的 stdinThread 没有感知到连接断开，继续显示菜单等待输入。
+下次登录时 `sendEnvelope` 往已关闭的连接写数据，失败。
+
+### 修复
+**登出时不关闭连接，只清理服务端会话状态：**
+
+```cpp
+// 修复前
+void ChatServer::handleLogout(...) {
+    users_.erase(uid);
+    tokens_.erase(req.token());
+    conn->shutdown();  // ← 直接关连接，客户端 stdinThread 不知道
+}
+
+// 修复后
+void ChatServer::handleLogout(...) {
+    users_.erase(uid);
+    tokens_.erase(req.token());
+    Session s;
+    s.uid = "";
+    s.authenticated = false;
+    conn->setContext(s);  // ← 清理会话，连接保持
+    // 返回登出确认给客户端
+}
+```
+
+### GDB 排查方法
+```bash
+# 服务端设断点观察 shutdown 调用
+gdb ./build_chat/src/chat_server
+(gdb) b ChatServer::handleLogout
+(gdb) commands
+> p uid
+> n
+> c
+> end
+(gdb) r 8000
+
+# 客户端操作：注册 → 登录 → 登出
+# 服务端会打印 uid 然后自动继续，观察 is DOWN 日志
+```
 
 ---
 
@@ -28,7 +81,7 @@ stdin 在主线程读；`quit` 时 `loop.quit()` 并 `ioThread.join()`。
 ### 验证
 修复后，客户端连接正常，服务端日志也正常。
 
-![alt text](image.png)
+![alt text](image_question_bug/image.png)
 
 ---
 
@@ -37,7 +90,7 @@ stdin 在主线程读；`quit` 时 `loop.quit()` 并 `ioThread.join()`。
 ### 现象
 客户端线程抛出 abort 异常，服务端日志正常。
 
-![alt text](image-1.png)
+![alt text](image_question_bug/image-1.png)
 
 ### 根因
 `EventLoop loop` 在 main 线程创建，但 `loop.loop()` 被放到 `ioThread`（另一个线程）调用。
@@ -52,7 +105,7 @@ gdb ./chat_client
 (gdb) r 127.0.0.1 8000
 ```
 
-![alt text](image-2.png)
+![alt text](image_question_bug/image-2.png)
 
 > 上图：线程调用不属于它的事件循环，导致异常抛出。
 
@@ -61,7 +114,7 @@ gdb ./chat_client
 (gdb) bt
 ```
 
-![alt text](image-3.png)
+![alt text](image_question_bug/image-3.png)
 
 关键帧：
 ```
@@ -78,7 +131,7 @@ gdb ./chat_client
 (gdb) p muduo::CurrentThread::t_cachedTid   # 当前 ioThread 的 ID
 ```
 
-![alt text](image-4.png)
+![alt text](image_question_bug/image-4.png)
 
 > 如我们所看，ioThread 线程 ID 与主线程 ID 不一致，导致 abort。
 
