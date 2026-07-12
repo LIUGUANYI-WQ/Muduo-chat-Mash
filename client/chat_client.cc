@@ -41,6 +41,7 @@ public:
     }
 
     void connect() { client_.connect(); }
+    void quit() { loop_->quit(); }
     bool connected() const { return conn_ && conn_->connected(); }
 
     // 所有连接访问都在 EventLoop 线程，线程安全
@@ -175,123 +176,106 @@ int main(int argc, char* argv[])
     InetAddress serverAddr(argv[1], atoi(argv[2]));
     ChatClient client(&loop, serverAddr);
     client.connect();
-
-    // EventLoop 必须在独立线程跑起来，TcpClient 的连接/收发都依赖它
-    std::thread ioThread([&loop]() { loop.loop(); });
-
-    printf("Connecting...\n");
-    Timestamp start = Timestamp::now();
-    while (!client.connected())
-    {
-        Timestamp now = Timestamp::now();
-        if (now.microSecondsSinceEpoch() - start.microSecondsSinceEpoch() > 5 * 1000000)
-            break;
-        usleep(10000);
-    }
-    if (!client.connected())
-    {
-        printf("Connection timeout\n");
-        loop.quit();
-        ioThread.join();
-        return 1;
-    }
-    printf("Connected.\n");
     printHelp();
 
-    char line[1024];
-    while (fgets(line, sizeof line, stdin))
-    {
-        char cmd[256] = {0};
-        char rest[1024] = {0};
-        if (sscanf(line, "%255s %1023[^\n]", cmd, rest) < 1)
-            continue;
+    // stdin 在独立线程读，通过 sendEnvelope 的 runInLoop 线程安全投递
+    std::thread stdinThread([&client, &loop]() {
+        char line[1024];
+        while (fgets(line, sizeof line, stdin))
+        {
+            char cmd[256] = {0};
+            char rest[1024] = {0};
+            if (sscanf(line, "%255s %1023[^\n]", cmd, rest) < 1)
+                continue;
 
-        chat::Envelope env;
+            chat::Envelope env;
 
-        if (strcmp(cmd, "login") == 0)
-        {
-            char uid[256] = {0};
-            char pwd[256] = {0};
-            sscanf(rest, "%255s %255s", uid, pwd);
-            auto req = env.mutable_login_req();
-            req->set_uid(uid);
-            req->set_passwd(pwd);
-        }
-        else if (strcmp(cmd, "msg") == 0)
-        {
-            char to[256] = {0};
-            char content[1024] = {0};
-            sscanf(rest, "%255s %1023[^\n]", to, content);
-            auto msg = env.mutable_chat_msg();
-            msg->set_to(to);
-            msg->set_content(content);
-        }
-        else if (strcmp(cmd, "room") == 0)
-        {
-            char name[256] = {0};
-            char content[1024] = {0};
-            sscanf(rest, "%255s %1023[^\n]", name, content);
-            auto msg = env.mutable_chat_msg();
-            msg->set_room(name);
-            msg->set_content(content);
-        }
-        else if (strcmp(cmd, "createroom") == 0)
-        {
-            char name[256] = {0};
-            sscanf(rest, "%255s", name);
-            auto req = env.mutable_create_room();
-            req->set_name(name);
-        }
-        else if (strcmp(cmd, "joinroom") == 0)
-        {
-            char room[256] = {0};
-            char uid[256] = {0};
-            sscanf(rest, "%255s %255s", room, uid);
-            auto req = env.mutable_join_room();
-            req->set_room_name(room);
-            req->set_uid(uid);
-        }
-        else if (strcmp(cmd, "friendreq") == 0)
-        {
-            char to[256] = {0};
-            char msg[1024] = {0};
-            sscanf(rest, "%255s %1023[^\n]", to, msg);
-            auto req = env.mutable_friend_req();
-            req->set_to_uid(to);
-            req->set_message(msg);
-        }
-        else if (strcmp(cmd, "friendresp") == 0)
-        {
-            char from[256] = {0};
-            char to[256] = {0};
-            int acc = 0;
-            sscanf(rest, "%255s %255s %d", from, to, &acc);
-            auto resp = env.mutable_friend_resp();
-            resp->set_from_uid(from);
-            resp->set_to_uid(to);
-            resp->set_accepted(acc != 0);
-        }
-        else if (strcmp(cmd, "recall") == 0)
-        {
-            char id[256] = {0};
-            sscanf(rest, "%255s", id);
-            auto req = env.mutable_recall_msg();
-            req->set_msg_id(strtoull(id, NULL, 10));
-        }
-        else if (strcmp(cmd, "quit") == 0)
-        {
-            loop.quit();
-            break;
-        }
-        else
-        {
-            printHelp();
-            continue;
-        }
+            if (strcmp(cmd, "login") == 0)
+            {
+                char uid[256] = {0};
+                char pwd[256] = {0};
+                sscanf(rest, "%255s %255s", uid, pwd);
+                auto req = env.mutable_login_req();
+                req->set_uid(uid);
+                req->set_passwd(pwd);
+            }
+            else if (strcmp(cmd, "msg") == 0)
+            {
+                char to[256] = {0};
+                char content[1024] = {0};
+                sscanf(rest, "%255s %1023[^\n]", to, content);
+                auto msg = env.mutable_chat_msg();
+                msg->set_to(to);
+                msg->set_content(content);
+            }
+            else if (strcmp(cmd, "room") == 0)
+            {
+                char name[256] = {0};
+                char content[1024] = {0};
+                sscanf(rest, "%255s %1023[^\n]", name, content);
+                auto msg = env.mutable_chat_msg();
+                msg->set_room(name);
+                msg->set_content(content);
+            }
+            else if (strcmp(cmd, "createroom") == 0)
+            {
+                char name[256] = {0};
+                sscanf(rest, "%255s", name);
+                auto req = env.mutable_create_room();
+                req->set_name(name);
+            }
+            else if (strcmp(cmd, "joinroom") == 0)
+            {
+                char room[256] = {0};
+                char uid[256] = {0};
+                sscanf(rest, "%255s %255s", room, uid);
+                auto req = env.mutable_join_room();
+                req->set_room_name(room);
+                req->set_uid(uid);
+            }
+            else if (strcmp(cmd, "friendreq") == 0)
+            {
+                char to[256] = {0};
+                char msg[1024] = {0};
+                sscanf(rest, "%255s %1023[^\n]", to, msg);
+                auto req = env.mutable_friend_req();
+                req->set_to_uid(to);
+                req->set_message(msg);
+            }
+            else if (strcmp(cmd, "friendresp") == 0)
+            {
+                char from[256] = {0};
+                char to[256] = {0};
+                int acc = 0;
+                sscanf(rest, "%255s %255s %d", from, to, &acc);
+                auto resp = env.mutable_friend_resp();
+                resp->set_from_uid(from);
+                resp->set_to_uid(to);
+                resp->set_accepted(acc != 0);
+            }
+            else if (strcmp(cmd, "recall") == 0)
+            {
+                char id[256] = {0};
+                sscanf(rest, "%255s", id);
+                auto req = env.mutable_recall_msg();
+                req->set_msg_id(strtoull(id, NULL, 10));
+            }
+            else if (strcmp(cmd, "quit") == 0)
+            {
+                client.quit();
+                break;
+            }
+            else
+            {
+                printHelp();
+                continue;
+            }
 
-        client.sendEnvelope(env);
-    }
+            client.sendEnvelope(env);
+        }
+        client.quit();
+    });
 
-    if (ioThread.joinable())
-        ioThread.join();
+    loop.loop();
+    stdinThread.join();
 }
