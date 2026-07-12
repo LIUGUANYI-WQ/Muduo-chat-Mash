@@ -49,7 +49,45 @@ func readServerMessage(conn net.Conn) (*pb.ServerMessage, error) {
 	return msg, nil
 }
 
-func worker(addr string, n int, wg *sync.WaitGroup, success *int64, fail *int64, latencies []time.Duration, idx int) {
+func registerWorker(addr string, n int, baseIdx int, wg *sync.WaitGroup, success *int64, fail *int64) {
+	defer wg.Done()
+
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		fmt.Printf("[register] connect failed: %v\n", err)
+		atomic.AddInt64(fail, int64(n))
+		return
+	}
+	defer conn.Close()
+
+	for i := 0; i < n; i++ {
+		uid := fmt.Sprintf("bench%d", baseIdx+i)
+		pwd := "bench123"
+
+		env := &pb.Envelope{
+			Payload: &pb.Envelope_RegisterReq{
+				RegisterReq: &pb.RegisterRequest{
+					Uid:    uid,
+					Passwd: pwd,
+				},
+			},
+		}
+
+		if err := sendEnvelope(conn, env); err != nil {
+			atomic.AddInt64(fail, 1)
+			continue
+		}
+
+		_, err := readServerMessage(conn)
+		if err != nil {
+			atomic.AddInt64(fail, 1)
+		} else {
+			atomic.AddInt64(success, 1)
+		}
+	}
+}
+
+func loginWorker(addr string, n int, fixed bool, wg *sync.WaitGroup, success *int64, fail *int64, latencies []time.Duration, idx int) {
 	defer wg.Done()
 
 	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
@@ -61,7 +99,12 @@ func worker(addr string, n int, wg *sync.WaitGroup, success *int64, fail *int64,
 	defer conn.Close()
 
 	for i := 0; i < n; i++ {
-		uid := fmt.Sprintf("bench%d", rand.Intn(1000000))
+		var uid string
+		if fixed {
+			uid = fmt.Sprintf("bench%d", rand.Intn(1000))
+		} else {
+			uid = fmt.Sprintf("bench%d", rand.Intn(1000000))
+		}
 		pwd := "bench123"
 
 		env := &pb.Envelope{
@@ -91,49 +134,14 @@ func worker(addr string, n int, wg *sync.WaitGroup, success *int64, fail *int64,
 	}
 }
 
-func main() {
-	addr := flag.String("addr", "127.0.0.1:9000", "server address")
-	concurrency := flag.Int("c", 50, "concurrent connections")
-	total := flag.Int("n", 10000, "total login requests")
-	flag.Parse()
-
-	fmt.Printf("Login QPS Benchmark\n")
-	fmt.Printf("Server:   %s\n", *addr)
-	fmt.Printf("Concurrency: %d\n", *concurrency)
-	fmt.Printf("Total:    %d\n", *total)
-	fmt.Println("--------------------------------------------------")
-
-	var success, fail int64
-	latencies := make([]time.Duration, *total)
-
-	reqPerWorker := *total / *concurrency
-	remainder := *total % *concurrency
-
-	var wg sync.WaitGroup
-
-	start := time.Now()
-
-	for i := 0; i < *concurrency; i++ {
-		n := reqPerWorker
-		if i < remainder {
-			n++
-		}
-		wg.Add(1)
-		go worker(*addr, n, &wg, &success, &fail, latencies, i)
-	}
-
-	wg.Wait()
-	elapsed := time.Since(start)
-
+func printStats(success int64, latencies []time.Duration, elapsed time.Duration) {
 	qps := float64(success) / elapsed.Seconds()
 
 	fmt.Printf("\nResults:\n")
 	fmt.Printf("  Time:      %v\n", elapsed.Round(time.Millisecond))
 	fmt.Printf("  Success:   %d\n", success)
-	fmt.Printf("  Failed:    %d\n", fail)
 	fmt.Printf("  QPS:       %.1f\n", qps)
 
-	// Calculate latency stats (only from successful ones)
 	var totalLat time.Duration
 	count := int64(0)
 	for _, l := range latencies {
@@ -146,14 +154,12 @@ func main() {
 		avg := totalLat / time.Duration(count)
 		fmt.Printf("  Avg Lat:   %v\n", avg.Round(time.Microsecond))
 
-		// Sort for percentiles
 		sorted := make([]time.Duration, 0, count)
 		for _, l := range latencies {
 			if l > 0 {
 				sorted = append(sorted, l)
 			}
 		}
-		// Simple insertion sort (fast for small-medium data)
 		for i := 1; i < len(sorted); i++ {
 			key := sorted[i]
 			j := i - 1
@@ -176,4 +182,78 @@ func main() {
 
 	fmt.Println("--------------------------------------------------")
 	fmt.Println("Done.")
+}
+
+func main() {
+	mode := flag.String("mode", "login", "mode: login or register")
+	addr := flag.String("addr", "127.0.0.1:8000", "server address")
+	concurrency := flag.Int("c", 50, "concurrent connections")
+	total := flag.Int("n", 10000, "total requests")
+	fixed := flag.Bool("fixed", false, "use fixed uids (bench0~bench999) for login")
+	flag.Parse()
+
+	fmt.Printf("Login QPS Benchmark\n")
+	fmt.Printf("Mode:     %s\n", *mode)
+	fmt.Printf("Server:   %s\n", *addr)
+	fmt.Printf("Concurrency: %d\n", *concurrency)
+	fmt.Printf("Total:    %d\n", *total)
+	if *fixed {
+		fmt.Printf("UID:      fixed (bench0~bench999)\n")
+	}
+	fmt.Println("--------------------------------------------------")
+
+	if *mode == "register" {
+		var success, fail int64
+		var wg sync.WaitGroup
+
+		reqPerWorker := *total / *concurrency
+		remainder := *total % *concurrency
+		base := 0
+
+		start := time.Now()
+		for i := 0; i < *concurrency; i++ {
+			n := reqPerWorker
+			if i < remainder {
+				n++
+			}
+			wg.Add(1)
+			go registerWorker(*addr, n, base, &wg, &success, &fail)
+			base += n
+		}
+		wg.Wait()
+		elapsed := time.Since(start)
+
+		fmt.Printf("\nRegister Results:\n")
+		fmt.Printf("  Time:      %v\n", elapsed.Round(time.Millisecond))
+		fmt.Printf("  Success:   %d\n", success)
+		fmt.Printf("  Failed:    %d\n", fail)
+		fmt.Printf("  QPS:       %.1f\n", float64(success)/elapsed.Seconds())
+		fmt.Println("--------------------------------------------------")
+		fmt.Println("Done.")
+		return
+	}
+
+	var success, fail int64
+	latencies := make([]time.Duration, *total)
+
+	reqPerWorker := *total / *concurrency
+	remainder := *total % *concurrency
+
+	var wg sync.WaitGroup
+
+	start := time.Now()
+
+	for i := 0; i < *concurrency; i++ {
+		n := reqPerWorker
+		if i < remainder {
+			n++
+		}
+		wg.Add(1)
+		go loginWorker(*addr, n, *fixed, &wg, &success, &fail, latencies, i)
+	}
+
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	printStats(success, latencies, elapsed)
 }
