@@ -68,7 +68,6 @@ void ChatServer::onConnection(const TcpConnectionPtr& conn)
             if (!s.uid.empty())
             {
                 users_.erase(s.uid);
-                tokens_.erase(s.token);
                 LOG_INFO << "User " << s.uid << " disconnected";
             }
         }
@@ -162,31 +161,37 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
         return;
     }
 
+    // token 登录：查 Redis 获取 uid
     if (!req.token().empty())
     {
-        auto it = tokens_.find(req.token());
-        if (it != tokens_.end())
+        // 遍历可能的 uid 不现实，需要客户端传 uid
+        // 这里假设客户端同时传了 uid + token
+        string uid = req.uid();
+        if (!uid.empty())
         {
-            string uid = it->second;
-            Session s;
-            s.uid = uid;
-            s.token = req.token();
-            s.authenticated = true;
-            conn->setContext(s);
+            string cachedToken;
+            if (redis_.getToken(uid, cachedToken) && cachedToken == req.token())
+            {
+                Session s;
+                s.uid = uid;
+                s.token = req.token();
+                s.authenticated = true;
+                conn->setContext(s);
+                users_[uid] = conn;
+                LOG_INFO << "User " << uid << " reconnected via token (Redis)";
 
-            users_[uid] = conn;
-            LOG_INFO << "User " << uid << " reconnected via token";
-
-            chat::ServerMessage reply;
-            reply.mutable_login_resp()->set_ok(true);
-            reply.mutable_login_resp()->set_token(req.token());
-            reply.mutable_login_resp()->set_server_time(
-                Timestamp::now().microSecondsSinceEpoch());
-            codec_.sendServerMessage(conn, reply);
-            return;
+                chat::ServerMessage reply;
+                reply.mutable_login_resp()->set_ok(true);
+                reply.mutable_login_resp()->set_token(req.token());
+                reply.mutable_login_resp()->set_server_time(
+                    Timestamp::now().microSecondsSinceEpoch());
+                codec_.sendServerMessage(conn, reply);
+                return;
+            }
         }
     }
 
+    // 密码登录
     string uid = req.uid();
     if (uid.empty())
     {
@@ -194,25 +199,13 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
         return;
     }
 
-    bool userOk = false;
-
-    // 先查 Redis 缓存
-    bool cached = false;
-    if (redis_.getCachedUserAuth(uid, userOk)) {
-        cached = true;
-    } else {
-        // 缓存未命中，查 MySQL
-        userOk = db_.verifyUser(uid, req.passwd());
-        // 缓存结果（存在缓存5分钟）
-        redis_.cacheUserAuth(uid, userOk, 300);
-    }
-
-    if (!userOk)
+    if (!db_.verifyUser(uid, req.passwd()))
     {
         sendError(conn, 6, "invalid uid or password");
         return;
     }
 
+    // 生成 token，写入 Redis（TTL 1小时）
     static thread_local std::mt19937 gen(std::random_device{}());
     static const char hex[] = "0123456789abcdef";
     std::uniform_int_distribution<> dis(0, 15);
@@ -220,13 +213,13 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
     for (int i = 0; i < 32; ++i)
         token[i] = hex[dis(gen)];
 
+    redis_.cacheToken(uid, token, 3600);
+
     Session s;
     s.uid = uid;
     s.token = token;
     s.authenticated = true;
     conn->setContext(s);
-
-    tokens_[token] = uid;
     users_[uid] = conn;
 
     LOG_INFO << "User " << uid << " logged in, token=" << token;
@@ -244,7 +237,7 @@ void ChatServer::handleLogout(const TcpConnectionPtr& conn,
 {
     string uid = req.uid();
     users_.erase(uid);
-    tokens_.erase(req.token());
+    redis_.invalidateToken(uid);
     LOG_INFO << "User " << uid << " logged out";
 
     Session s;

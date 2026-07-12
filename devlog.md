@@ -1,59 +1,6 @@
 # Dev Log
 
 > 记录开发过程中遇到的问题、排查思路与结论。新条目加在顶部。
-> 所有截图统一存放在 `image_question_bug/` 目录。
-
----
-
-## BUG #3：登出后关闭连接但 stdinThread 仍在运行
-
-### 现象
-客户端选择登出后，服务端日志显示 `is DOWN`（连接断开），但客户端的 stdinThread 还在跑，
-回到认证菜单，再登录失败（连接已断）。
-
-### 根因
-`handleLogout` 里调用 `conn->shutdown()` 直接关闭了 TCP 连接，
-但客户端的 stdinThread 没有感知到连接断开，继续显示菜单等待输入。
-下次登录时 `sendEnvelope` 往已关闭的连接写数据，失败。
-
-### 修复
-**登出时不关闭连接，只清理服务端会话状态：**
-
-```cpp
-// 修复前
-void ChatServer::handleLogout(...) {
-    users_.erase(uid);
-    tokens_.erase(req.token());
-    conn->shutdown();  // ← 直接关连接，客户端 stdinThread 不知道
-}
-
-// 修复后
-void ChatServer::handleLogout(...) {
-    users_.erase(uid);
-    tokens_.erase(req.token());
-    Session s;
-    s.uid = "";
-    s.authenticated = false;
-    conn->setContext(s);  // ← 清理会话，连接保持
-    // 返回登出确认给客户端
-}
-```
-
-### GDB 排查方法
-```bash
-# 服务端设断点观察 shutdown 调用
-gdb ./build_chat/src/chat_server
-(gdb) b ChatServer::handleLogout
-(gdb) commands
-> p uid
-> n
-> c
-> end
-(gdb) r 8000
-
-# 客户端操作：注册 → 登录 → 登出
-# 服务端会打印 uid 然后自动继续，观察 is DOWN 日志
-```
 
 ---
 
@@ -81,7 +28,7 @@ stdin 在主线程读；`quit` 时 `loop.quit()` 并 `ioThread.join()`。
 ### 验证
 修复后，客户端连接正常，服务端日志也正常。
 
-![alt text](image_question_bug/image.png)
+![alt text](image.png)
 
 ---
 
@@ -90,7 +37,7 @@ stdin 在主线程读；`quit` 时 `loop.quit()` 并 `ioThread.join()`。
 ### 现象
 客户端线程抛出 abort 异常，服务端日志正常。
 
-![alt text](image_question_bug/image-1.png)
+![alt text](image-1.png)
 
 ### 根因
 `EventLoop loop` 在 main 线程创建，但 `loop.loop()` 被放到 `ioThread`（另一个线程）调用。
@@ -105,7 +52,7 @@ gdb ./chat_client
 (gdb) r 127.0.0.1 8000
 ```
 
-![alt text](image_question_bug/image-2.png)
+![alt text](image-2.png)
 
 > 上图：线程调用不属于它的事件循环，导致异常抛出。
 
@@ -114,7 +61,7 @@ gdb ./chat_client
 (gdb) bt
 ```
 
-![alt text](image_question_bug/image-3.png)
+![alt text](image-3.png)
 
 关键帧：
 ```
@@ -131,7 +78,7 @@ gdb ./chat_client
 (gdb) p muduo::CurrentThread::t_cachedTid   # 当前 ioThread 的 ID
 ```
 
-![alt text](image_question_bug/image-4.png)
+![alt text](image-4.png)
 
 > 如我们所看，ioThread 线程 ID 与主线程 ID 不一致，导致 abort。
 
@@ -148,8 +95,11 @@ std::thread stdinThread([&]() {
     client.sendEnvelope(env);  // 内部用 runInLoop，安全
 });
 ```
+客户端再登出是,返回一条日志后续登录无法成功
+![alt text](image-5.png)
 
 ---
+handleLogout 里调了 conn->shutdown()——服务端关闭连接后，客户端的 onConnection 触发 loop_->quit()，但 stdinThread 还在跑，显示了菜单但连接已断，再登录就失败了。
 
 ## 知识总结
 
@@ -231,3 +181,100 @@ Thread A 想发消息给 Thread B 管的连接：
 > muduo 能用少量线程处理几万并发连接——每个线程专注自己的 EventLoop，零锁竞争，CPU 缓存命中率高，性能接近单线程但又能利用多核。
 
 跨线程事件通知使用 `eventfd` 和同步队列来实现，保证线程之间的安全通信。
+
+---
+
+## BUG #3：Redis bool 缓存导致鉴权脏数据
+
+### 现象
+
+用 Redis 缓存用户鉴权结果（`auth:uid = 1/0`，TTL 300s），压测 QPS 没有提升。
+进一步调试发现：`SETEX` 返回 OK (type=5)，但紧接的 `GET` 返回 NIL (type=4)。
+
+### 根因分析
+
+#### 1. hiredis 多线程竞态
+
+chat_server 有 4 个 EventLoop 线程（1 main + 3 sub），共用一个 `redisContext*`。
+虽然加了 `std::mutex`，但 Redis 协议是请求-响应式的：
+
+```
+线程A: SETEX auth:bench0 300 1  →  发送命令
+线程B: GET auth:bench0          →  发送命令（线程A的响应还没读）
+线程A: 读响应                   →  读到的是线程B的GET响应
+线程B: 读响应                   →  读到的是线程A的SETEX响应
+```
+
+协议流交叉导致类型错乱。hiredis 文档明确说明：**一个 redisContext 只能在一个线程中使用**，
+多线程必须每个线程一个连接，或用 pipeline + 队列分发。
+
+#### 2. Bool 缓存的脏数据问题
+
+即使 hiredis 竞态修复，bool 缓存仍有逻辑漏洞：
+
+```
+时刻1: 用户A密码登录 → Redis SET auth:A=1 (TTL 300s)
+时刻2: 用户A修改密码 → MySQL 更新密码，但 Redis 仍缓存 auth:A=1
+时刻3: 攻击者用旧密码登录 → Redis 命中 auth:A=1 → 跳过MySQL → 登录成功！
+```
+
+### 解决方案：Token 鉴权
+
+抛弃 bool 缓存，改为 token 鉴权：
+
+```
+登录流程：
+1. MySQL 验证密码（SHA256，~1ms）
+2. 生成随机 token（32位 hex）
+3. Redis: SETEX token:uid {token} 3600
+4. 返回 token 给客户端
+
+后续鉴权：
+1. 客户端携带 uid + token
+2. Redis: GET token:uid → 比对 token
+3. 匹配则鉴权通过（跳过 MySQL）
+
+改密码时：
+1. MySQL 更新密码
+2. Redis: DEL token:uid（立即失效）
+```
+
+#### Token 方案的优势
+
+| 对比项 | Bool 缓存 (auth:uid) | Token 鉴权 (token:uid) |
+|--------|----------------------|------------------------|
+| 脏数据 | 改密码后旧缓存仍有效 | 改密码 DEL token 立即失效 |
+| 竞态 | 频繁 GET/SET 同一 key | 每次登录写入唯一 token |
+| 安全性 | 缓存的是"是否通过" | 缓存的是随机 token 字符串 |
+| 跨节点 | 需要同步 bool 状态 | Redis 天然共享 token |
+
+#### 数据结构选择
+
+用 Redis **String**（`SET/GET`）而非 Hash：
+
+```
+SET token:bench0 "a1b2c3d4..." EX 3600
+GET token:bench0
+```
+
+原因：token 鉴权只需要一个值（token 字符串），String 最简单高效。
+Hash 适合多字段场景（如 `HSET user:bench0 token "abc" last_login "123"`），此处不需要。
+
+### 压测验证
+
+Token 模式压测结果（预注册用户，先密码登录获取 token，再用 token 重连）：
+
+| 测试 | 并发 | QPS | P99 | 说明 |
+|------|------|-----|-----|------|
+| T-1  | 50   | 1128.2 | 48.7ms | token 重连路径生效 |
+| T-2  | 200  | 4277.6 | 53.7ms | 与密码模式持平 |
+| T-3  | 500  | 5504.1 | 55.1ms | 53%成功率 |
+
+QPS 未提升的原因：压测 worker 共享 bench0-bench999，token 互相覆盖，大部分请求仍走 MySQL。
+真实场景（每用户独占连接）下 token 路径会稳定生效。
+
+### 关键教训
+
+1. **hiredis 不是线程安全的**：多线程必须每线程一个连接，或用 `redisAsyncContext`
+2. **缓存鉴权结果（bool）不如缓存凭证（token）**：bool 无法及时失效
+3. **压测工具设计要考虑隔离性**：共享 UID 导致 token 覆盖，掩盖了真实优化效果

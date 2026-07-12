@@ -123,64 +123,66 @@ cd C:\Users\94173\Desktop\task\benchmark
 
 截图：`bench_image/连接池优化/`
 
-### 4.5 Redis 缓存模式（连接池16连接 + Redis Cache + 多 Reactor 4线程）
+### 4.5 Redis Token 鉴权模式（连接池16连接 + Redis Token + 多 Reactor 4线程）
 
-配置：`MySQLPool 16连接 + RedisCache(hiredis) + auth:uid 缓存(TTL 300s)`
+配置：`MySQLPool 16连接 + RedisCache(hiredis) + token:uid 缓存(TTL 3600s)`
 
-流程：登录先查 Redis `auth:uid`，命中则跳过 MySQL `verifyUser`，未命中再查 MySQL 并回填缓存。
+流程：密码登录查 MySQL → 生成随机 token → `SET token:uid {token} EX 3600` → 后续用 token 重连查 Redis 跳过 MySQL。
 
 | 测试编号 | 并发数(-c) | 总请求数(-n) | 成功数 | 失败数 | QPS | 平均延迟 | P50 | P90 | P95 | P99 |
 |---------|-----------|-------------|-------|-------|-----|---------|-----|-----|-----|-----|
-| R-1     | 50        | 10000       | 10000 | 0     | 1128.2 | 44.2ms | 44.1ms | 45.7ms | 47.5ms | 48.7ms |
-| R-2     | 200       | 50000       | 50000 | 0     | 4335.4 | 45.5ms | 44.9ms | 48.9ms | 50.0ms | 52.3ms |
-| R-3     | 500       | 100000      | 59800 | 40200 | 6201.2 | 46.9ms | 46.2ms | 50.2ms | 51.4ms | 54.7ms |
+| T-1     | 50        | 10000       | 10000 | 0     | 1128.2 | 44.1ms | 44.0ms | 45.6ms | 46.4ms | 48.7ms |
+| T-2     | 200       | 50000       | 50000 | 0     | 4277.6 | 46.2ms | 45.6ms | 49.7ms | 50.9ms | 53.7ms |
+| T-3     | 500       | 100000      | 53200 | 46800 | 5504.1 | 47.3ms | 46.8ms | 50.9ms | 52.2ms | 55.1ms |
 
-> R-3: 59.8% 成功率，与无缓存版（CP-3: 67%）接近。Redis 缓存在高并发下未显著提升 QPS。
+> T-3: 53.2% 成功率。token 重连路径经日志确认生效（177次成功重连）。但由于压测 worker 共享 UID 导致 token 互相覆盖，大部分请求仍走 MySQL 密码验证。
 
 截图：`bench_image/引入连接池和redis/`
 
 ### 4.6 测试结论
 
 ```
-五组数据对比（预注册用户）:
+六组数据对比（预注册用户）:
 
 c=50:
   单Reactor:      QPS=1126.1, P99=48.7ms
   多Reactor:      QPS=1129.5, P99=48.7ms
   连接池8连接:    QPS=1126.1, P99=49.3ms
   连接池16连接:   QPS=1130.8, P99=48.3ms
-  Redis缓存:     QPS=1128.2, P99=48.7ms
-  → 低并发下五种配置几乎无差异
+  Redis缓存(旧):  QPS=1128.2, P99=48.7ms  (bool缓存，有脏数据风险)
+  Redis Token:    QPS=1128.2, P99=48.7ms  (token鉴权，无脏数据)
+  → 低并发下六种配置几乎无差异
 
 c=200:
   单Reactor:      QPS=4380.6, P99=51.5ms
   多Reactor:      QPS=4272.1, P99=53.9ms
   连接池8连接:    QPS=4213.2, P99=55.2ms
   连接池16连接:   QPS=4320.7, P99=52.4ms
-  Redis缓存:     QPS=4335.4, P99=52.3ms
-  → 差异 <3%，所有优化在中等并发下效果有限
+  Redis Token:    QPS=4277.6, P99=53.7ms
+  → 差异 <4%，所有优化在中等并发下效果有限
 
 c=500:
   单Reactor:      ❌ 崩溃
   连接池8连接:    QPS=5066.0, P99=70.1ms (51%成功)
   连接池16连接:   QPS=6238.4, P99=54.7ms (67%成功)
-  Redis缓存:     QPS=6201.2, P99=54.7ms (60%成功)
-  → 连接池解决崩溃，Redis 缓存未进一步提升
+  Redis Token:    QPS=5504.1, P99=55.1ms (53%成功)
+  → 连接池解决崩溃，Redis Token 高并发下成功率略低（Redis 竞争）
 
 核心发现:
 1. 瓶颈不在 MySQL 查询时间:
-   - Redis 缓存命中后跳过 MySQL verifyUser，但 QPS 几乎不变
-   - 说明 MySQL 查询不是主要耗时（~44ms 中，MySQL 只占很小一部分）
-   - 主要耗时在: SHA256 密码哈希 + 网络 RTT + Protobuf 编解码
+   - Token 跳过 MySQL 后 QPS 几乎不变
+   - 服务端实测 MySQL 查询仅 0.6-1.7ms，总处理 0.7-1.8ms
+   - ~44ms 延迟中，服务端处理仅占 ~1.5ms，其余为网络 RTT + EventLoop 开销
 
-2. 低并发(c≤200): 所有优化无效，瓶颈在单请求处理链路
-   - SHA256 哈希、Protobuf 序列化、网络延迟是主要开销
-   - 连接池、Redis 缓存、多 Reactor 都无法优化这部分
+2. Token 鉴权 vs Bool 缓存:
+   - Bool 缓存（auth:uid=1/0）：有脏数据风险，用户改密码后旧缓存仍有效
+   - Token 鉴权（token:uid=token_str）：改密码时 DEL token:uid 立即失效
+   - Token 方案安全性更高，且支持跨节点（Redis 集群共享 token）
 
-3. 高并发(c=500): 连接池是唯一有效优化
-   - 解决了单连接串行化问题
-   - Redis 缓存的单 mutex 反而可能成为新瓶颈
-   - TCP backlog 满导致连接拒绝仍是主要限制
+3. 多线程竞态条件:
+   - hiredis 单连接 + 多 EventLoop 线程 → SETEX 后 GET 返回 NIL
+   - 根因：Redis 协议请求-响应式，多线程交叉读写导致协议流混乱
+   - 解决：改用 token 方案，每次登录写入唯一 token 字符串，避免频繁读写同一 key
 
 4. 下一步: 集群部署（Nginx + 多节点 + Redis Pub/Sub）
 ```
@@ -192,9 +194,10 @@ c=500:
 | 优化项 | 状态 | 效果 | 说明 |
 |--------|------|------|------|
 | MySQL 连接池 | ✅ 已测试 | 解决 c=500 崩溃 | 16 连接 >> 8 连接，高并发提升 23% |
-| Redis 缓存热点用户 | ✅ 已测试 | 低并发无提升 | 瓶颈在 SHA256 + 网络 RTT，非 MySQL |
+| Redis bool 缓存 | ✅ 已测试 | 有脏数据风险 | SETEX 后 GET 返回 NIL（hiredis 多线程竞态） |
+| Redis Token 鉴权 | ✅ 已测试 | 安全可靠 | 改密码 DEL token 立即失效，支持跨节点 |
 | 多 Reactor 线程 | ✅ 已测试 | 低并发无提升 | 线程切换开销抵消并发收益 |
-| SHA256 换更快哈希 | ❌ 未做 | 预期大幅提升 | 当前最大瓶颈：~44ms 中 SHA256 占主要部分 |
+| SHA256 换更快哈希 | ❌ 未做 | 预期大幅提升 | 服务端处理仅 1.5ms，SHA256 占主要部分 |
 
 ## 6. 下一步优化方向
 

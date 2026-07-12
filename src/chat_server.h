@@ -66,7 +66,6 @@ public:
 
     std::unordered_map<muduo::string, muduo::net::TcpConnectionPtr> users_;
     std::map<muduo::string, std::set<muduo::string>> rooms_;
-    std::unordered_map<muduo::string, muduo::string> tokens_;
     std::map<muduo::string, std::set<muduo::string>> friendships_;
     std::set<muduo::string> pending_friend_requests_;
 };

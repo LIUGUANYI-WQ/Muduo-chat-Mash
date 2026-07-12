@@ -134,6 +134,69 @@ func loginWorker(addr string, n int, fixed bool, wg *sync.WaitGroup, success *in
 	}
 }
 
+func tokenLoginWorker(addr string, n int, fixed bool, wg *sync.WaitGroup, success *int64, fail *int64, latencies []time.Duration, idx int) {
+	defer wg.Done()
+
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		fmt.Printf("[worker %d] connect failed: %v\n", idx, err)
+		atomic.AddInt64(fail, int64(n))
+		return
+	}
+	defer conn.Close()
+
+	tokens := make(map[string]string)
+
+	for i := 0; i < n; i++ {
+		var uid string
+		if fixed {
+			uid = fmt.Sprintf("bench%d", rand.Intn(1000))
+		} else {
+			uid = fmt.Sprintf("bench%d", rand.Intn(1000000))
+		}
+
+		var env *pb.Envelope
+		if tok, ok := tokens[uid]; ok {
+			env = &pb.Envelope{
+				Payload: &pb.Envelope_LoginReq{
+					LoginReq: &pb.LoginRequest{
+						Uid:   uid,
+						Token: tok,
+					},
+				},
+			}
+		} else {
+			env = &pb.Envelope{
+				Payload: &pb.Envelope_LoginReq{
+					LoginReq: &pb.LoginRequest{
+						Uid:    uid,
+						Passwd: "bench123",
+					},
+				},
+			}
+		}
+
+		start := time.Now()
+		if err := sendEnvelope(conn, env); err != nil {
+			atomic.AddInt64(fail, 1)
+			continue
+		}
+
+		resp, err := readServerMessage(conn)
+		elapsed := time.Since(start)
+
+		if err != nil {
+			atomic.AddInt64(fail, 1)
+		} else {
+			if resp.GetLoginResp().GetOk() {
+				tokens[uid] = resp.GetLoginResp().GetToken()
+			}
+			atomic.AddInt64(success, 1)
+			latencies[idx*n+i] = elapsed
+		}
+	}
+}
+
 func printStats(success int64, latencies []time.Duration, elapsed time.Duration) {
 	qps := float64(success) / elapsed.Seconds()
 
@@ -185,7 +248,7 @@ func printStats(success int64, latencies []time.Duration, elapsed time.Duration)
 }
 
 func main() {
-	mode := flag.String("mode", "login", "mode: login or register")
+	mode := flag.String("mode", "login", "mode: login, register, or token")
 	addr := flag.String("addr", "127.0.0.1:8000", "server address")
 	concurrency := flag.Int("c", 50, "concurrent connections")
 	total := flag.Int("n", 10000, "total requests")
@@ -249,7 +312,11 @@ func main() {
 			n++
 		}
 		wg.Add(1)
-		go loginWorker(*addr, n, *fixed, &wg, &success, &fail, latencies, i)
+		if *mode == "token" {
+			go tokenLoginWorker(*addr, n, *fixed, &wg, &success, &fail, latencies, i)
+		} else {
+			go loginWorker(*addr, n, *fixed, &wg, &success, &fail, latencies, i)
+		}
 	}
 
 	wg.Wait()
