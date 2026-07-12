@@ -103,9 +103,9 @@ MYSQL* MySQLPool::getConnection() {
     MYSQL* conn = idle_.front();
     idle_.pop();
     activeConns_++;
-    lock.unlock();
+    lock.unlock();  // 释放锁，ping 和重连在锁外执行，避免阻塞其他线程
 
-    // 健康检查
+    // 健康检查（锁外执行，ping 可能耗时较长）
     if (!pingConnection(conn)) {
         fprintf(stderr, "MySQL pool: stale connection detected, reconnecting\n");
         mysql_close(conn);
