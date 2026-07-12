@@ -6,8 +6,18 @@
 #include <condition_variable>
 #include <queue>
 #include <vector>
-#include <functional>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <mysql/mysql.h>
+
+struct ConnInfo {
+    std::string host;
+    int port;
+    std::string user;
+    std::string password;
+    std::string database;
+};
 
 class MySQLPool {
 public:
@@ -16,32 +26,29 @@ public:
 
     bool init(const std::string& host, int port,
               const std::string& user, const std::string& password,
-              const std::string& database, int poolSize);
+              const std::string& database, int poolSize = 0);
 
     bool registerUser(const std::string& uid, const std::string& passwd);
     bool verifyUser(const std::string& uid, const std::string& passwd);
     bool userExists(const std::string& uid);
 
-private:
-    struct ConnWrapper {
-        MYSQL* conn;
-        bool inUse;
-    };
+    int activeConns() const { return activeConns_.load(); }
+    int idleConns() const;
 
+private:
+    MYSQL* createConnection();
     MYSQL* getConnection();
     void returnConnection(MYSQL* conn);
     bool ensureTable(MYSQL* conn);
+    bool pingConnection(MYSQL* conn);
 
-    std::string host_;
-    int port_;
-    std::string user_;
-    std::string password_;
-    std::string database_;
-
+    ConnInfo info_;
     std::vector<MYSQL*> conns_;
     std::queue<MYSQL*> idle_;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::condition_variable cond_;
+    std::atomic<int> activeConns_{0};
+    int maxSize_ = 0;
 };
 
 #endif
