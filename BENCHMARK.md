@@ -45,7 +45,8 @@ C++ muduo 的 Reactor 模型适合**服务端**（少量长连接、高吞吐）
 | 内存 | （请填写） |
 | MySQL | 8.0, localhost:3306, chat 库 |
 | 服务端 | chat_server（muduo + Protobuf） |
-| 压测端 | login_bench.exe（Go 1.24 协程） |
+| 压测端 | login_bench.exe（Go 1.24，Windows） / login_bench_linux（Go Linux 交叉编译，WSL2 内部） |
+| WSL2 内部 IP | `hostname -I` 获取，用于 Windows 直连绕开 localhost 端口转发 |
 
 ---
 
@@ -61,22 +62,30 @@ bash run_server.sh
 
 确认看到 `MySQL connected` 和监听端口输出。
 
-### Step 2: 运行压测（两种方式）
+### Step 2: 运行压测（三种方式）
 
 ```powershell
-# Windows PowerShell（含 WSL2 桥接延迟 +42ms）
+# Windows PowerShell（含 WSL2 端口转发 +42ms，≈开发环境真实延迟）
 cd C:\Users\94173\Desktop\task\benchmark
 .\login_bench.exe -addr 127.0.0.1:8000 -c 50 -n 10000
+```
+
+```powershell
+# Windows PowerShell（直连 WSL2 IP，无端口转发，≈1-2ms 虚拟网络延迟）
+# IP 从 WSL2 运行 hostname -I 获取，或从 run_server.sh 输出查看
+.\login_bench.exe -addr 172.25.248.184:8000 -c 50 -n 10000
 ```
 
 ```bash
 # WSL 内部（真实服务器性能）
 cd /mnt/c/Users/94173/Desktop/task/benchmark
+chmod +x login_bench_linux
 ./login_bench_linux -addr 127.0.0.1:9876 -c 50 -n 10000
 ```
 
-> 注意：Windows → WSL2 的 localhost 端口转发有 ~42ms 固定开销，会完全掩盖服务器端性能差异。
-> 如需测量真实服务器性能，请使用 WSL2 内部编译的 Linux 压测二进制，或部署到真实 Linux 机器。
+> **关于 WSL2 网络延迟**：Windows → `127.0.0.1` 有 ~42ms 固定开销（WSL2 `localhost` 端口转发）。
+> 改用 WSL2 内部 IP（`172.x.x.x`）直连可降至 ~1-2ms，与 WSL2 内部测试接近。
+> 详见 `devlog.md` BUG#4 章节。
 
 ### Step 3: 记录数据
 
@@ -207,17 +216,21 @@ c=500:
 
 ```
 根因突破:
-  1. ~44ms 延迟 = WSL2 虚拟网络桥接 + Windows 端口转发（~42ms）
+  1. ~44ms 延迟 = WSL2 localhost 端口转发（~42ms）
                       + 服务端处理（~1.5ms）
                       
-  2. 真实服务器性能（WSL2 内部）:
+  2. Windows → WSL2 IP 直连（172.25.x.x 而非 127.0.0.1）:
+     c=50: QPS=6086, AvgLat=8ms（之前 127.0.0.1: QPS=1129, AvgLat=44ms）
+     仅略低于 WSL2 内部（QPS=8186），验证 42ms 纯属端口转发
+
+  3. 真实服务器性能（WSL2 内部）:
      单连接:     1.5ms 延迟
      50 并发:    8186 QPS
      100 并发:   8788 QPS（峰值）
      200+ 并发:  7800-8000 QPS（饱和）
-     
-  3. 之前所有优化（连接池/Redis/线程池）的 QPS 差异 <5%:
-     - 因为瓶颈是那固定的 42ms 桥接延迟，不是服务器本身
+
+  4. 之前所有优化（连接池/Redis/线程池）的 QPS 差异 <5%:
+     - 因为瓶颈是那固定的 42ms 端口转发，不是服务器本身
      - 优化只在 42ms 外改善了一点点，所以看起来无效
 
 线程池 + runInLoop 修复:
