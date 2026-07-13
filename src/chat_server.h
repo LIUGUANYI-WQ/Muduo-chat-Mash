@@ -7,6 +7,7 @@
 #include "src/codec.h"
 #include "src/db.h"
 #include "src/redis.h"
+#include "src/thread_pool.h"
 #include "chat.pb.h"
 
 #include <map>
@@ -63,6 +64,7 @@ public:
     muduo::net::EventLoop* loop_;
     MySQLPool db_;
     RedisCache redis_;
+    ThreadPool threadPool_;
 
     std::unordered_map<muduo::string, muduo::net::TcpConnectionPtr> users_;
     std::map<muduo::string, std::set<muduo::string>> rooms_;

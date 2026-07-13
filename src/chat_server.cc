@@ -14,7 +14,8 @@ using namespace muduo::net;
 ChatServer::ChatServer(EventLoop* loop, const InetAddress& listenAddr)
     : server_(loop, listenAddr, "ChatServer"),
       codec_(std::bind(&ChatServer::onEnvelope, this, _1, _2, _3)),
-      loop_(loop)
+      loop_(loop),
+      threadPool_(4)
 {
     const char* host = std::getenv("MYSQL_HOST");
     const char* user = std::getenv("MYSQL_USER");
@@ -164,30 +165,36 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
     // token 登录：查 Redis 获取 uid
     if (!req.token().empty())
     {
-        // 遍历可能的 uid 不现实，需要客户端传 uid
-        // 这里假设客户端同时传了 uid + token
         string uid = req.uid();
         if (!uid.empty())
         {
-            string cachedToken;
-            if (redis_.getToken(uid, cachedToken) && cachedToken == req.token())
-            {
-                Session s;
-                s.uid = uid;
-                s.token = req.token();
-                s.authenticated = true;
-                conn->setContext(s);
-                users_[uid] = conn;
-                LOG_INFO << "User " << uid << " reconnected via token (Redis)";
+            // Redis GET 放到线程池
+            threadPool_.enqueue([this, conn, uid, token = req.token()]() {
+                string cachedToken;
+                bool ok = redis_.getToken(uid, cachedToken) && cachedToken == token;
 
-                chat::ServerMessage reply;
-                reply.mutable_login_resp()->set_ok(true);
-                reply.mutable_login_resp()->set_token(req.token());
-                reply.mutable_login_resp()->set_server_time(
-                    Timestamp::now().microSecondsSinceEpoch());
-                codec_.sendServerMessage(conn, reply);
-                return;
-            }
+                loop_->runInLoop([this, conn, uid, token, ok]() {
+                    if (ok) {
+                        Session s;
+                        s.uid = uid;
+                        s.token = token;
+                        s.authenticated = true;
+                        conn->setContext(s);
+                        users_[uid] = conn;
+                        LOG_INFO << "User " << uid << " reconnected via token (Redis)";
+
+                        chat::ServerMessage reply;
+                        reply.mutable_login_resp()->set_ok(true);
+                        reply.mutable_login_resp()->set_token(token);
+                        reply.mutable_login_resp()->set_server_time(
+                            Timestamp::now().microSecondsSinceEpoch());
+                        codec_.sendServerMessage(conn, reply);
+                    } else {
+                        sendError(conn, 6, "invalid token");
+                    }
+                });
+            });
+            return;
         }
     }
 
@@ -199,37 +206,47 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
         return;
     }
 
-    if (!db_.verifyUser(uid, req.passwd()))
-    {
-        sendError(conn, 6, "invalid uid or password");
-        return;
-    }
+    string passwd = req.passwd();
 
-    // 生成 token，写入 Redis（TTL 1小时）
-    static thread_local std::mt19937 gen(std::random_device{}());
-    static const char hex[] = "0123456789abcdef";
-    std::uniform_int_distribution<> dis(0, 15);
-    string token(32, ' ');
-    for (int i = 0; i < 32; ++i)
-        token[i] = hex[dis(gen)];
+    // MySQL verifyUser + Redis cacheToken 放到线程池
+    threadPool_.enqueue([this, conn, uid, passwd]() {
+        bool userOk = db_.verifyUser(uid, passwd);
 
-    redis_.cacheToken(uid, token, 3600);
+        if (!userOk) {
+            loop_->runInLoop([this, conn]() {
+                sendError(conn, 6, "invalid uid or password");
+            });
+            return;
+        }
 
-    Session s;
-    s.uid = uid;
-    s.token = token;
-    s.authenticated = true;
-    conn->setContext(s);
-    users_[uid] = conn;
+        // 生成 token，写入 Redis
+        static thread_local std::mt19937 gen(std::random_device{}());
+        static const char hex[] = "0123456789abcdef";
+        std::uniform_int_distribution<> dis(0, 15);
+        string token(32, ' ');
+        for (int i = 0; i < 32; ++i)
+            token[i] = hex[dis(gen)];
 
-    LOG_INFO << "User " << uid << " logged in, token=" << token;
+        redis_.cacheToken(uid, token, 3600);
 
-    chat::ServerMessage reply;
-    reply.mutable_login_resp()->set_ok(true);
-    reply.mutable_login_resp()->set_token(token);
-    reply.mutable_login_resp()->set_server_time(
-        Timestamp::now().microSecondsSinceEpoch());
-    codec_.sendServerMessage(conn, reply);
+        loop_->runInLoop([this, conn, uid, token]() {
+            Session s;
+            s.uid = uid;
+            s.token = token;
+            s.authenticated = true;
+            conn->setContext(s);
+            users_[uid] = conn;
+
+            LOG_INFO << "User " << uid << " logged in, token=" << token;
+
+            chat::ServerMessage reply;
+            reply.mutable_login_resp()->set_ok(true);
+            reply.mutable_login_resp()->set_token(token);
+            reply.mutable_login_resp()->set_server_time(
+                Timestamp::now().microSecondsSinceEpoch());
+            codec_.sendServerMessage(conn, reply);
+        });
+    });
 }
 
 void ChatServer::handleLogout(const TcpConnectionPtr& conn,
@@ -237,7 +254,12 @@ void ChatServer::handleLogout(const TcpConnectionPtr& conn,
 {
     string uid = req.uid();
     users_.erase(uid);
-    redis_.invalidateToken(uid);
+
+    // Redis DEL 放到线程池
+    threadPool_.enqueue([this, uid]() {
+        redis_.invalidateToken(uid);
+    });
+
     LOG_INFO << "User " << uid << " logged out";
 
     Session s;
@@ -260,29 +282,39 @@ void ChatServer::handleRegister(const TcpConnectionPtr& conn,
         return;
     }
 
-    if (db_.userExists(req.uid()))
-    {
-        chat::ServerMessage reply;
-        reply.mutable_register_resp()->set_ok(false);
-        reply.mutable_register_resp()->set_reason("user already exists");
-        codec_.sendServerMessage(conn, reply);
-        return;
-    }
+    string uid = req.uid();
+    string passwd = req.passwd();
 
-    if (!db_.registerUser(req.uid(), req.passwd()))
-    {
-        chat::ServerMessage reply;
-        reply.mutable_register_resp()->set_ok(false);
-        reply.mutable_register_resp()->set_reason("register failed");
-        codec_.sendServerMessage(conn, reply);
-        return;
-    }
+    // MySQL userExists + registerUser 放到线程池
+    threadPool_.enqueue([this, conn, uid, passwd]() {
+        if (db_.userExists(uid)) {
+            loop_->runInLoop([this, conn]() {
+                chat::ServerMessage reply;
+                reply.mutable_register_resp()->set_ok(false);
+                reply.mutable_register_resp()->set_reason("user already exists");
+                codec_.sendServerMessage(conn, reply);
+            });
+            return;
+        }
 
-    LOG_INFO << "User " << req.uid() << " registered";
+        if (!db_.registerUser(uid, passwd)) {
+            loop_->runInLoop([this, conn]() {
+                chat::ServerMessage reply;
+                reply.mutable_register_resp()->set_ok(false);
+                reply.mutable_register_resp()->set_reason("register failed");
+                codec_.sendServerMessage(conn, reply);
+            });
+            return;
+        }
 
-    chat::ServerMessage reply;
-    reply.mutable_register_resp()->set_ok(true);
-    codec_.sendServerMessage(conn, reply);
+        LOG_INFO << "User " << uid << " registered";
+
+        loop_->runInLoop([this, conn]() {
+            chat::ServerMessage reply;
+            reply.mutable_register_resp()->set_ok(true);
+            codec_.sendServerMessage(conn, reply);
+        });
+    });
 }
 
 void ChatServer::handleChatMessage(const TcpConnectionPtr& conn,
