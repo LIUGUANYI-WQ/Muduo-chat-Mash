@@ -8,11 +8,10 @@
 int main(int argc, char* argv[])
 {
     LOG_INFO << "pid = " << getpid();
-    if (argc > 1)
+    if (argc > 2)
     {
         muduo::net::EventLoop loop;
-        uint16_t port = static_cast<uint16_t>(atoi(argv[1]));
-        muduo::net::InetAddress listenAddr(port);
+        muduo::net::InetAddress listenAddr(argv[1], static_cast<uint16_t>(atoi(argv[2])));
         ChatServer server(&loop, listenAddr);
         server.setThreadNum(4);  // 4个I/O线程（1 main + 3 sub）
         server.start();
@@ -20,7 +19,7 @@ int main(int argc, char* argv[])
     }
     else
     {
-        printf("Usage: %s port\n", argv[0]);
+        printf("Usage: %s ip port\n", argv[0]);
     }
     return 0;
 }

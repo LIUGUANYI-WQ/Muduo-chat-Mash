@@ -3,6 +3,7 @@ build/
 build*/
 release-cpp11/
 release-install-cpp11/
+benchmark/login_bench_linux
 
 # ─── Protobuf 生成文件（由 protoc 生成，不要入库）──
 proto/*.pb.cc

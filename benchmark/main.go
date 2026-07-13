@@ -98,6 +98,9 @@ func loginWorker(addr string, n int, fixed bool, wg *sync.WaitGroup, success *in
 	}
 	defer conn.Close()
 
+	var totalMarshal, totalSend, totalRecv, totalUnmarshal time.Duration
+	totalCalls := 0
+
 	for i := 0; i < n; i++ {
 		var uid string
 		if fixed {
@@ -107,6 +110,7 @@ func loginWorker(addr string, n int, fixed bool, wg *sync.WaitGroup, success *in
 		}
 		pwd := "bench123"
 
+		t0 := time.Now()
 		env := &pb.Envelope{
 			Payload: &pb.Envelope_LoginReq{
 				LoginReq: &pb.LoginRequest{
@@ -115,22 +119,66 @@ func loginWorker(addr string, n int, fixed bool, wg *sync.WaitGroup, success *in
 				},
 			},
 		}
-
-		start := time.Now()
-		if err := sendEnvelope(conn, env); err != nil {
+		data, err := proto.Marshal(env)
+		t1 := time.Now()
+		if err != nil {
 			atomic.AddInt64(fail, 1)
 			continue
 		}
 
-		_, err := readServerMessage(conn)
-		elapsed := time.Since(start)
-
-		if err != nil {
+		var hdr [4]byte
+		binary.BigEndian.PutUint32(hdr[:], uint32(len(data)))
+		if _, err := conn.Write(hdr[:]); err != nil {
 			atomic.AddInt64(fail, 1)
-		} else {
-			atomic.AddInt64(success, 1)
-			latencies[idx*n+i] = elapsed
+			continue
 		}
+		if _, err := conn.Write(data); err != nil {
+			atomic.AddInt64(fail, 1)
+			continue
+		}
+		t2 := time.Now()
+
+		var rhdr [4]byte
+		if _, err := io.ReadFull(conn, rhdr[:]); err != nil {
+			atomic.AddInt64(fail, 1)
+			continue
+		}
+		rsize := binary.BigEndian.Uint32(rhdr[:])
+		buf := make([]byte, rsize)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			atomic.AddInt64(fail, 1)
+			continue
+		}
+		t3 := time.Now()
+
+		msg := &pb.ServerMessage{}
+		if err := proto.Unmarshal(buf, msg); err != nil {
+			atomic.AddInt64(fail, 1)
+			continue
+		}
+		t4 := time.Now()
+
+		if msg.GetLoginResp().GetOk() {
+			totalMarshal += t1.Sub(t0)
+			totalSend += t2.Sub(t1)
+			totalRecv += t3.Sub(t2)
+			totalUnmarshal += t4.Sub(t3)
+			totalCalls++
+			latencies[idx*n+i] = t4.Sub(t0)
+			atomic.AddInt64(success, 1)
+		} else {
+			atomic.AddInt64(fail, 1)
+		}
+	}
+
+	if totalCalls > 0 {
+		fmt.Printf("[worker %d] marshal_avg=%v send_avg=%v recv_avg=%v unmarshal_avg=%v (n=%d)\n",
+			idx,
+			totalMarshal/time.Duration(totalCalls),
+			totalSend/time.Duration(totalCalls),
+			totalRecv/time.Duration(totalCalls),
+			totalUnmarshal/time.Duration(totalCalls),
+			totalCalls)
 	}
 }
 

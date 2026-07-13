@@ -184,6 +184,57 @@ Thread A 想发消息给 Thread B 管的连接：
 
 ---
 
+## BUG #4：ThreadPool runInLoop 投递到错误 EventLoop
+
+### 现象
+
+ThreadPool 异步任务完成后，响应需要 ~30ms 才能返回客户端（从 WSL2 内部压测发现 recv_avg=29ms）。
+且线程池版本的 QPS 比纯同步版本还低（5115 vs 6201），不符合预期。
+
+### 根因
+
+所有 `runInLoop` 调用都写死为 `loop_`（主 EventLoop），但 muduo `TcpServer` 启用多 Reactor 后，
+连接被分配到 sub EventLoop（Round-Robin）。投递到主 EventLoop 的 functor 需要经过：
+
+```
+线程池完成 → runInLoop(main EventLoop) → eventfd 唤醒主线
+            → main EventLoop 处理 functor → conn->send()
+            → conn 属于 sub EventLoop → 内部 runInLoop(sub EventLoop)
+            → eventfd 再次唤醒 sub 线程 → 真正发送
+```
+
+**多了两次 eventfd 唤醒 + 两次线程上下文切换**，延迟从 ~0.7ms 膨胀到 ~30ms。
+
+### 修复
+
+用 `conn->getLoop()` 获取连接所属的正确 EventLoop，直接投递：
+
+```cpp
+// 错误：投递到主 EventLoop
+loop_->runInLoop([this, conn]() { ... });
+
+// 正确：投递到连接所属的 EventLoop
+auto* ioLoop = conn->getLoop();
+ioLoop->runInLoop([this, conn]() { ... });
+```
+
+### 验证
+
+WSL2 内部压测（ThreadPool + 4 I/O 线程 + Redis Token）：
+
+| 配置 | 单连接延迟 | c=50 QPS |
+|------|-----------|---------|
+| 修复前（loop_） | ~30ms | — |
+| 修复后（conn->getLoop()） | ~1.5ms | 8186 |
+
+### 教训
+
+1. **muduo 多 EventLoop 下必须用 `conn->getLoop()` 确定连接所属线程**，不能写死
+2. `conn->send()` 是线程安全的（内部跨线程投递），但会增加延迟
+3. 通过响应延迟是否 ~1ms 还是 ~30ms，可以快速判断 runInLoop 是否投递错了 EventLoop
+
+---
+
 ## BUG #3：Redis bool 缓存导致鉴权脏数据
 
 ### 现象

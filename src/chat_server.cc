@@ -173,7 +173,8 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
                 string cachedToken;
                 bool ok = redis_.getToken(uid, cachedToken) && cachedToken == token;
 
-                loop_->runInLoop([this, conn, uid, token, ok]() {
+                auto* ioLoop = conn->getLoop();
+                ioLoop->runInLoop([this, conn, uid, token, ok]() {
                     if (ok) {
                         Session s;
                         s.uid = uid;
@@ -213,7 +214,8 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
         bool userOk = db_.verifyUser(uid, passwd);
 
         if (!userOk) {
-            loop_->runInLoop([this, conn]() {
+            auto* ioLoop = conn->getLoop();
+            ioLoop->runInLoop([this, conn]() {
                 sendError(conn, 6, "invalid uid or password");
             });
             return;
@@ -229,7 +231,8 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
 
         redis_.cacheToken(uid, token, 3600);
 
-        loop_->runInLoop([this, conn, uid, token]() {
+        auto* ioLoop = conn->getLoop();
+        ioLoop->runInLoop([this, conn, uid, token]() {
             Session s;
             s.uid = uid;
             s.token = token;
@@ -288,7 +291,8 @@ void ChatServer::handleRegister(const TcpConnectionPtr& conn,
     // MySQL userExists + registerUser 放到线程池
     threadPool_.enqueue([this, conn, uid, passwd]() {
         if (db_.userExists(uid)) {
-            loop_->runInLoop([this, conn]() {
+            auto* ioLoop = conn->getLoop();
+            ioLoop->runInLoop([this, conn]() {
                 chat::ServerMessage reply;
                 reply.mutable_register_resp()->set_ok(false);
                 reply.mutable_register_resp()->set_reason("user already exists");
@@ -298,7 +302,8 @@ void ChatServer::handleRegister(const TcpConnectionPtr& conn,
         }
 
         if (!db_.registerUser(uid, passwd)) {
-            loop_->runInLoop([this, conn]() {
+            auto* ioLoop = conn->getLoop();
+            ioLoop->runInLoop([this, conn]() {
                 chat::ServerMessage reply;
                 reply.mutable_register_resp()->set_ok(false);
                 reply.mutable_register_resp()->set_reason("register failed");
@@ -309,7 +314,8 @@ void ChatServer::handleRegister(const TcpConnectionPtr& conn,
 
         LOG_INFO << "User " << uid << " registered";
 
-        loop_->runInLoop([this, conn]() {
+        auto* ioLoop = conn->getLoop();
+        ioLoop->runInLoop([this, conn]() {
             chat::ServerMessage reply;
             reply.mutable_register_resp()->set_ok(true);
             codec_.sendServerMessage(conn, reply);

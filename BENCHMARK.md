@@ -61,13 +61,22 @@ bash run_server.sh
 
 确认看到 `MySQL connected` 和监听端口输出。
 
-### Step 2: 运行压测
+### Step 2: 运行压测（两种方式）
 
 ```powershell
-# Windows PowerShell
+# Windows PowerShell（含 WSL2 桥接延迟 +42ms）
 cd C:\Users\94173\Desktop\task\benchmark
 .\login_bench.exe -addr 127.0.0.1:8000 -c 50 -n 10000
 ```
+
+```bash
+# WSL 内部（真实服务器性能）
+cd /mnt/c/Users/94173/Desktop/task/benchmark
+./login_bench_linux -addr 127.0.0.1:9876 -c 50 -n 10000
+```
+
+> 注意：Windows → WSL2 的 localhost 端口转发有 ~42ms 固定开销，会完全掩盖服务器端性能差异。
+> 如需测量真实服务器性能，请使用 WSL2 内部编译的 Linux 压测二进制，或部署到真实 Linux 机器。
 
 ### Step 3: 记录数据
 
@@ -139,7 +148,7 @@ cd C:\Users\94173\Desktop\task\benchmark
 
 截图：`bench_image/引入连接池和redis/`
 
-### 4.6 测试结论
+### 4.6 测试结论（Windows → WSL2 压测，含桥接开销）
 
 ```
 六组数据对比（预注册用户）:
@@ -168,23 +177,64 @@ c=500:
   Redis Token:    QPS=5504.1, P99=55.1ms (53%成功)
   → 连接池解决崩溃，Redis Token 高并发下成功率略低（Redis 竞争）
 
-核心发现:
-1. 瓶颈不在 MySQL 查询时间:
-   - Token 跳过 MySQL 后 QPS 几乎不变
-   - 服务端实测 MySQL 查询仅 0.6-1.7ms，总处理 0.7-1.8ms
-   - ~44ms 延迟中，服务端处理仅占 ~1.5ms，其余为网络 RTT + EventLoop 开销
+⚠ 以上所有数据均从 Windows 跨 WSL2 虚拟网络桥接压测（额外 ~42ms 开销）
+```
 
-2. Token 鉴权 vs Bool 缓存:
-   - Bool 缓存（auth:uid=1/0）：有脏数据风险，用户改密码后旧缓存仍有效
-   - Token 鉴权（token:uid=token_str）：改密码时 DEL token:uid 立即失效
-   - Token 方案安全性更高，且支持跨节点（Redis 集群共享 token）
+### 4.7 WSL2 内部真实性能（无桥接开销）
 
-3. 多线程竞态条件:
-   - hiredis 单连接 + 多 EventLoop 线程 → SETEX 后 GET 返回 NIL
-   - 根因：Redis 协议请求-响应式，多线程交叉读写导致协议流混乱
-   - 解决：改用 token 方案，每次登录写入唯一 token 字符串，避免频繁读写同一 key
+在 WSL2 内部编译 Linux Go 压测工具 `login_bench_linux`，
+直接连 WSL2 `127.0.0.1:9876`，消除 Windows-WSL2 桥接延迟。
 
-4. 下一步: 集群部署（Nginx + 多节点 + Redis Pub/Sub）
+配置：4 I/O 线程（1 main + 3 sub）+ ThreadPool(4 workers) + Redis Token 鉴权
+
+| 测试编号 | 并发(-c) | 请求(-n) | 成功 | 失败 | QPS | 平均延迟 | P50 | P90 | P95 | P99 |
+|---------|---------|---------|------|------|-----|---------|-----|-----|-----|-----|
+| W-1     | 1       | 3       | 3    | 0    | 429  | 1.545ms | 566µs | 3.517ms | 3.517ms | 3.517ms |
+| W-2     | 50      | 1000    | 1000 | 0    | 8186 | 5.351ms | 5.439ms | 6.216ms | 7.663ms | 35.811ms |
+| W-3     | 100     | 5000    | 5000 | 0    | 8788 | 10.984ms | 10.79ms | 11.707ms | 11.921ms | 22.665ms |
+| W-4     | 200     | 5000    | 5000 | 0    | 7911 | 22.409ms | 22.745ms | 26.523ms | 28.276ms | 40.128ms |
+| W-5     | 500     | 2000    | 2000 | 0    | 7840 | 39.589ms | 30.48ms | 72.702ms | 82.045ms | 89.804ms |
+| W-6     | 500     | 5000    | 5000 | 0    | 8035 | 49.878ms | 53.5ms | 56.865ms | 59.109ms | 60.765ms |
+
+**分段计时（W-1，c=1）：**
+- marshal_avg: <1µs（protobuf 编码）
+- send_avg: <1µs（TCP 发送）
+- **recv_avg: 717µs（发送后到收到响应的等待时间）**
+- unmarshal_avg: 33µs（protobuf 解码）
+- **总延迟 ~1.5ms，服务端处理占 ~48%**
+
+### 4.8 核心发现（更新后）
+
+```
+根因突破:
+  1. ~44ms 延迟 = WSL2 虚拟网络桥接 + Windows 端口转发（~42ms）
+                      + 服务端处理（~1.5ms）
+                      
+  2. 真实服务器性能（WSL2 内部）:
+     单连接:     1.5ms 延迟
+     50 并发:    8186 QPS
+     100 并发:   8788 QPS（峰值）
+     200+ 并发:  7800-8000 QPS（饱和）
+     
+  3. 之前所有优化（连接池/Redis/线程池）的 QPS 差异 <5%:
+     - 因为瓶颈是那固定的 42ms 桥接延迟，不是服务器本身
+     - 优化只在 42ms 外改善了一点点，所以看起来无效
+
+线程池 + runInLoop 修复:
+  - 之前 threadPool_.enqueue 的 runInLoop 投递到 main EventLoop（loop_）
+  - 连接实际属于 sub EventLoop，导致多了一次 eventfd 唤醒 + 线程切换
+  - 修复: 用 conn->getLoop() 直接投递到正确的 EventLoop
+  - 在非队列瓶颈时改善不明显，但修复了线程安全顽疾
+
+Token 鉴权:
+  - 安全性正确，跨节点支持
+  - 当前场景下 Token vs 密码 性能无差异（MySQL 只查一次）
+  - 集群部署时 Redis GET 远程查询的优势会显现
+
+下一步:
+  1. 集群部署（Nginx + 多节点 + Redis Pub/Sub）
+  2. 换更快的哈希（xxhash/BLAKE3 替代 SHA256）
+  3. 异步 MySQL 驱动
 ```
 
 ---
@@ -197,7 +247,8 @@ c=500:
 | Redis bool 缓存 | ✅ 已测试 | 有脏数据风险 | SETEX 后 GET 返回 NIL（hiredis 多线程竞态） |
 | Redis Token 鉴权 | ✅ 已测试 | 安全可靠 | 改密码 DEL token 立即失效，支持跨节点 |
 | 多 Reactor 线程 | ✅ 已测试 | 低并发无提升 | 线程切换开销抵消并发收益 |
-| SHA256 换更快哈希 | ❌ 未做 | 预期大幅提升 | 服务端处理仅 1.5ms，SHA256 占主要部分 |
+| 线程池异步 | ✅ 已测试 | 修复线程安全 | 正确使用 conn->getLoop() 后修复跨 EventLoop 问题 |
+| SHA256 换更快哈希 | ❌ 未做 | 预期小幅提升 | 单连接 1.5ms 中 MySQL 占 ~0.6ms，CPU 哈希占 <0.2ms |
 
 ## 6. 下一步优化方向
 
