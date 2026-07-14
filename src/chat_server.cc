@@ -7,6 +7,8 @@
 #include <functional>
 #include <random>
 #include <cstdlib>
+#include <ctime>
+#include <cstdio>
 
 using namespace muduo;
 using namespace muduo::net;
@@ -175,13 +177,17 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
 
                 UserInfo info;
                 std::vector<UserInfo> friends;
+                std::vector<string> pendingReqs;
+                std::vector<MessageInfo> offlineMsgs;
                 if (ok) {
                     info = db_.getUserInfo(uid);
                     friends = db_.getFriendList(uid);
+                    pendingReqs = db_.getPendingRequests(uid);
+                    offlineMsgs = db_.getUndeliveredMessages(uid);
                 }
 
                 auto* ioLoop = conn->getLoop();
-                ioLoop->runInLoop([this, conn, uid, token, ok, info, friends]() {
+                ioLoop->runInLoop([this, conn, uid, token, ok, info, friends, pendingReqs, offlineMsgs]() {
                     if (ok) {
                         Session s;
                         s.uid = uid;
@@ -205,6 +211,34 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
                         reply.mutable_login_resp()->set_server_time(
                             Timestamp::now().microSecondsSinceEpoch());
                         codec_.sendServerMessage(conn, reply);
+
+                        // 推送待处理的好友请求
+                        for (const auto& requester : pendingReqs) {
+                            pending_friend_requests_.insert(requester + ":" + uid);
+                            chat::ServerMessage pending;
+                            chat::FriendRequest* fr = pending.mutable_friend_req();
+                            fr->set_from_uid(requester);
+                            fr->set_to_uid(uid);
+                            codec_.sendServerMessage(conn, pending);
+                        }
+
+                        // 推送离线消息
+                        for (const auto& om : offlineMsgs) {
+                            chat::ServerMessage om_reply;
+                            chat::ChatMessage* cm = om_reply.mutable_chat_msg();
+                            cm->set_from(om.from_uid);
+                            if (!om.to_uid.empty()) cm->set_to(om.to_uid);
+                            if (!om.room_name.empty()) cm->set_room(om.room_name);
+                            cm->set_content(om.content);
+                            cm->set_msg_id(om.msg_id);
+                            cm->set_timestamp(Timestamp::now().microSecondsSinceEpoch());
+                            codec_.sendServerMessage(conn, om_reply);
+                        }
+                        if (!offlineMsgs.empty()) {
+                            threadPool_.enqueue([this, uid]() {
+                                db_.markMessagesDelivered(uid);
+                            });
+                        }
 
                         // 推送好友列表
                         sendFriendList(conn);
@@ -239,9 +273,11 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
             return;
         }
 
-        // 查用户资料 + 好友列表
+        // 查用户资料 + 好友列表 + 待处理请求 + 离线消息
         UserInfo info = db_.getUserInfo(uid);
         auto friends = db_.getFriendList(uid);
+        auto pendingReqs = db_.getPendingRequests(uid);
+        auto offlineMsgs = db_.getUndeliveredMessages(uid);
 
         // 生成 token，写入 Redis
         static thread_local std::mt19937 gen(std::random_device{}());
@@ -254,7 +290,7 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
         redis_.cacheToken(uid, token, 3600);
 
         auto* ioLoop = conn->getLoop();
-        ioLoop->runInLoop([this, conn, uid, token, info, friends]() {
+        ioLoop->runInLoop([this, conn, uid, token, info, friends, pendingReqs, offlineMsgs]() {
             Session s;
             s.uid = uid;
             s.token = token;
@@ -278,6 +314,34 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
             loginReply.mutable_login_resp()->set_server_time(
                 Timestamp::now().microSecondsSinceEpoch());
             codec_.sendServerMessage(conn, loginReply);
+
+            // 推送待处理的好友请求
+            for (const auto& requester : pendingReqs) {
+                pending_friend_requests_.insert(requester + ":" + uid);
+                chat::ServerMessage pending;
+                chat::FriendRequest* fr = pending.mutable_friend_req();
+                fr->set_from_uid(requester);
+                fr->set_to_uid(uid);
+                codec_.sendServerMessage(conn, pending);
+            }
+
+            // 推送离线消息
+            for (const auto& om : offlineMsgs) {
+                chat::ServerMessage om_reply;
+                chat::ChatMessage* cm = om_reply.mutable_chat_msg();
+                cm->set_from(om.from_uid);
+                if (!om.to_uid.empty()) cm->set_to(om.to_uid);
+                if (!om.room_name.empty()) cm->set_room(om.room_name);
+                cm->set_content(om.content);
+                cm->set_msg_id(om.msg_id);
+                cm->set_timestamp(Timestamp::now().microSecondsSinceEpoch());
+                codec_.sendServerMessage(conn, om_reply);
+            }
+            if (!offlineMsgs.empty()) {
+                threadPool_.enqueue([this, uid]() {
+                    db_.markMessagesDelivered(uid);
+                });
+            }
 
             // 推送好友列表
             sendFriendList(conn);
@@ -366,82 +430,139 @@ void ChatServer::handleChatMessage(const TcpConnectionPtr& conn,
 
     const string& from = currentUid(conn);
 
-    if (!msg.to().empty())
-    {
-        auto it = users_.find(msg.to());
-        if (it != users_.end())
-        {
-            chat::ServerMessage reply;
-            chat::ChatMessage* cm = reply.mutable_chat_msg();
-            cm->set_from(from);
-            cm->set_to(msg.to());
-            cm->set_content(msg.content());
-            cm->set_timestamp(Timestamp::now().microSecondsSinceEpoch());
-            codec_.sendServerMessage(it->second, reply);
+    // MySQL 持久化 + 转发放在线程池
+    threadPool_.enqueue([this, conn, from, to = msg.to(), room = msg.room(), content = msg.content()]() {
+        int64_t msg_id = db_.storeMessage(from, to, room, content);
 
-            chat::ServerMessage echo;
-            chat::ChatMessage* em = echo.mutable_chat_msg();
-            em->set_from(from);
-            em->set_to(msg.to());
-            em->set_content(msg.content());
-            em->set_timestamp(Timestamp::now().microSecondsSinceEpoch());
-            codec_.sendServerMessage(conn, echo);
-        }
-        else
-        {
-            sendError(conn, 3, "user offline");
-        }
-    }
-    else if (!msg.room().empty())
-    {
-        auto rit = rooms_.find(msg.room());
-        if (rit != rooms_.end())
-        {
-            for (const auto& member : rit->second)
+        auto* ioLoop = conn->getLoop();
+        ioLoop->runInLoop([this, conn, from, to, room, content, msg_id]() {
+            int64_t now = Timestamp::now().microSecondsSinceEpoch();
+
+            if (!to.empty())
             {
-                auto uit = users_.find(member);
-                if (uit != users_.end())
-                {
-                    chat::ServerMessage reply;
-                    chat::ChatMessage* cm = reply.mutable_chat_msg();
-                    cm->set_from(from);
-                    cm->set_room(msg.room());
-                    cm->set_content(msg.content());
-                    cm->set_timestamp(Timestamp::now().microSecondsSinceEpoch());
-                    codec_.sendServerMessage(uit->second, reply);
+                // 私聊
+                auto it = users_.find(to);
+                bool offline = (it == users_.end());
+
+                chat::ServerMessage reply;
+                chat::ChatMessage* cm = reply.mutable_chat_msg();
+                cm->set_from(from);
+                cm->set_to(to);
+                cm->set_content(content);
+                cm->set_msg_id(msg_id);
+                cm->set_timestamp(now);
+                if (!offline)
+                    codec_.sendServerMessage(it->second, reply);
+
+                // 发给发送者回执（含 msg_id）
+                chat::ServerMessage echo;
+                chat::ChatMessage* em = echo.mutable_chat_msg();
+                em->set_from(from);
+                em->set_to(to);
+                em->set_content(content);
+                em->set_msg_id(msg_id);
+                em->set_timestamp(now);
+                codec_.sendServerMessage(conn, echo);
+
+                if (offline) {
+                    sendError(conn, 3, "user offline");
+                    // 离线消息写入 offline_messages，上线后补推
+                    threadPool_.enqueue([this, to, msg_id]() {
+                        db_.addOfflineMessage(to, msg_id);
+                    });
                 }
             }
-        }
-        else
-        {
-            sendError(conn, 4, "room not found");
-        }
-    }
+            else if (!room.empty())
+            {
+                // 群聊
+                auto rit = rooms_.find(room);
+                if (rit != rooms_.end())
+                {
+                    for (const auto& member : rit->second)
+                    {
+                        auto uit = users_.find(member);
+                        if (uit != users_.end())
+                        {
+                            chat::ServerMessage reply;
+                            chat::ChatMessage* cm = reply.mutable_chat_msg();
+                            cm->set_from(from);
+                            cm->set_room(room);
+                            cm->set_content(content);
+                            cm->set_msg_id(msg_id);
+                            cm->set_timestamp(now);
+                            codec_.sendServerMessage(uit->second, reply);
+                        }
+                    }
+                }
+                else
+                {
+                    sendError(conn, 4, "room not found");
+                }
+            }
+        });
+    });
 }
 
 void ChatServer::handleCreateRoom(const TcpConnectionPtr& conn,
                                  const chat::CreateRoom& req)
 {
+    if (!isAuthenticated(conn))
+        return;
+    const string& uid = currentUid(conn);
+
     if (rooms_.find(req.name()) != rooms_.end())
     {
         sendError(conn, 5, "room already exists");
         return;
     }
-    rooms_[req.name()] = std::set<string>();
-    LOG_INFO << "Room created: " << req.name();
+
+    threadPool_.enqueue([this, conn, uid, name = req.name()]() {
+        if (db_.roomExists(name)) {
+            auto* ioLoop = conn->getLoop();
+            ioLoop->runInLoop([this, conn]() {
+                sendError(conn, 5, "room already exists");
+            });
+            return;
+        }
+
+        int64_t roomId = db_.createRoom(name, uid);
+        if (roomId > 0) {
+            db_.addRoomMember(roomId, uid);
+        }
+
+        auto* ioLoop = conn->getLoop();
+        ioLoop->runInLoop([this, conn, uid, name]() {
+            rooms_[name].insert(uid);
+            LOG_INFO << "Room created: " << name << " by " << uid;
+        });
+    });
 }
 
 void ChatServer::handleJoinRoom(const TcpConnectionPtr& conn,
                                const chat::JoinRoom& req)
 {
-    auto it = rooms_.find(req.room_name());
-    if (it == rooms_.end())
-    {
-        sendError(conn, 4, "room not found");
+    if (!isAuthenticated(conn))
         return;
-    }
-    it->second.insert(req.uid());
-    LOG_INFO << "User " << req.uid() << " joined room " << req.room_name();
+    const string& uid = currentUid(conn);
+
+    threadPool_.enqueue([this, conn, uid, roomName = req.room_name()]() {
+        int64_t roomId = db_.getRoomIdByName(roomName);
+        if (roomId <= 0) {
+            auto* ioLoop = conn->getLoop();
+            ioLoop->runInLoop([this, conn]() {
+                sendError(conn, 4, "room not found");
+            });
+            return;
+        }
+
+        db_.addRoomMember(roomId, uid);
+
+        auto* ioLoop = conn->getLoop();
+        ioLoop->runInLoop([this, conn, uid, roomName]() {
+            rooms_[roomName].insert(uid);
+            LOG_INFO << "User " << uid << " joined room " << roomName;
+        });
+    });
 }
 
 void ChatServer::handleFriendRequest(const TcpConnectionPtr& conn,
@@ -576,48 +697,110 @@ void ChatServer::handleRecall(const TcpConnectionPtr& conn,
     if (!isAuthenticated(conn))
         return;
     const string& uid = currentUid(conn);
+    int64_t msg_id = req.msg_id();
 
-    if (!req.to_uid().empty())
-    {
-        auto it = users_.find(req.to_uid());
-        if (it != users_.end())
+    threadPool_.enqueue([this, conn, uid, msg_id, to = req.to_uid(), room = req.room()]() {
+        // 查消息是否存在
+        MessageInfo msg = db_.getMessage(msg_id);
+        if (!msg.exists)
         {
-            chat::ServerMessage reply;
-            chat::RecallNotify* rn = reply.mutable_recall_notify();
-            rn->set_msg_id(req.msg_id());
-            rn->set_from_uid(uid);
-            rn->set_to_uid(req.to_uid());
-            rn->set_recall_time(Timestamp::now().microSecondsSinceEpoch());
-            codec_.sendServerMessage(it->second, reply);
+            auto* ioLoop = conn->getLoop();
+            ioLoop->runInLoop([this, conn]() {
+                sendError(conn, 8, "message not found");
+            });
+            return;
         }
-        chat::ServerMessage echo;
-        chat::RecallNotify* en = echo.mutable_recall_notify();
-        en->set_msg_id(req.msg_id());
-        en->set_from_uid(uid);
-        en->set_recall_time(Timestamp::now().microSecondsSinceEpoch());
-        codec_.sendServerMessage(conn, echo);
-    }
-    else if (!req.room().empty())
-    {
-        auto rit = rooms_.find(req.room());
-        if (rit != rooms_.end())
+
+        // 校验：只能撤回自己的消息
+        if (msg.from_uid != uid)
         {
-            for (const auto& member : rit->second)
+            auto* ioLoop = conn->getLoop();
+            ioLoop->runInLoop([this, conn]() {
+                sendError(conn, 9, "can only recall your own messages");
+            });
+            return;
+        }
+
+        // 校验：2 分钟时间窗口
+        time_t now = time(nullptr);
+        struct tm tm = {};
+        sscanf(msg.created_at.c_str(), "%4d-%2d-%2d %2d:%2d:%2d",
+               &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
+               &tm.tm_hour, &tm.tm_min, &tm.tm_sec);
+        tm.tm_year -= 1900;
+        tm.tm_mon -= 1;
+        time_t msgTime = mktime(&tm);
+        if (now - msgTime > 120)
+        {
+            auto* ioLoop = conn->getLoop();
+            ioLoop->runInLoop([this, conn]() {
+                sendError(conn, 10, "recall window expired (2 min)");
+            });
+            return;
+        }
+
+        // MySQL 标记撤回
+        bool recalled = db_.recallMessage(msg_id, uid);
+
+        auto* ioLoop = conn->getLoop();
+        ioLoop->runInLoop([this, conn, uid, msg_id, to, room, recalled]() {
+            if (!recalled)
             {
-                auto uit = users_.find(member);
-                if (uit != users_.end())
+                sendError(conn, 11, "recall failed");
+                return;
+            }
+
+            int64_t recallTime = Timestamp::now().microSecondsSinceEpoch();
+
+            if (!to.empty())
+            {
+                // 私聊撤回 — 通知对方
+                auto it = users_.find(to);
+                if (it != users_.end())
                 {
                     chat::ServerMessage reply;
                     chat::RecallNotify* rn = reply.mutable_recall_notify();
-                    rn->set_msg_id(req.msg_id());
+                    rn->set_msg_id(msg_id);
                     rn->set_from_uid(uid);
-                    rn->set_room(req.room());
-                    rn->set_recall_time(Timestamp::now().microSecondsSinceEpoch());
-                    codec_.sendServerMessage(uit->second, reply);
+                    rn->set_to_uid(to);
+                    rn->set_recall_time(recallTime);
+                    codec_.sendServerMessage(it->second, reply);
                 }
             }
-        }
-    }
+            else if (!room.empty())
+            {
+                // 群聊撤回 — 广播给房间所有在线成员
+                auto rit = rooms_.find(room);
+                if (rit != rooms_.end())
+                {
+                    for (const auto& member : rit->second)
+                    {
+                        auto uit = users_.find(member);
+                        if (uit != users_.end())
+                        {
+                            chat::ServerMessage reply;
+                            chat::RecallNotify* rn = reply.mutable_recall_notify();
+                            rn->set_msg_id(msg_id);
+                            rn->set_from_uid(uid);
+                            rn->set_room(room);
+                            rn->set_recall_time(recallTime);
+                            codec_.sendServerMessage(uit->second, reply);
+                        }
+                    }
+                }
+            }
+
+            // 给发送者回执
+            chat::ServerMessage echo;
+            chat::RecallNotify* en = echo.mutable_recall_notify();
+            en->set_msg_id(msg_id);
+            en->set_from_uid(uid);
+            if (!to.empty()) en->set_to_uid(to);
+            if (!room.empty()) en->set_room(room);
+            en->set_recall_time(recallTime);
+            codec_.sendServerMessage(conn, echo);
+        });
+    });
 }
 
 void ChatServer::sendError(const TcpConnectionPtr& conn,

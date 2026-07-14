@@ -217,12 +217,14 @@ private:
                         break;
                     case chat::ServerMessage::kChatMsg:
                         if (!msg.chat_msg().room().empty())
-                            printf("\n[room:%s] %s: %s\n",
+                            printf("\n[room:%s] [id=%lu] %s: %s\n",
                                    msg.chat_msg().room().c_str(),
+                                   msg.chat_msg().msg_id(),
                                    msg.chat_msg().from().c_str(),
                                    msg.chat_msg().content().c_str());
                         else
-                            printf("\n[private] %s -> me: %s\n",
+                            printf("\n[private] [id=%lu] %s -> me: %s\n",
+                                   msg.chat_msg().msg_id(),
                                    msg.chat_msg().from().c_str(),
                                    msg.chat_msg().content().c_str());
                         printf("> ");
@@ -243,9 +245,15 @@ private:
                         fflush(stdout);
                         break;
                     case chat::ServerMessage::kRecallNotify:
-                        printf("\n[recall] msg_id=%lu from=%s\n",
-                               msg.recall_notify().msg_id(),
-                               msg.recall_notify().from_uid().c_str());
+                        if (!msg.recall_notify().room().empty())
+                            printf("\n[recall] [id=%lu] %s 在房间 %s 撤回了一条消息\n",
+                                   msg.recall_notify().msg_id(),
+                                   msg.recall_notify().from_uid().c_str(),
+                                   msg.recall_notify().room().c_str());
+                        else
+                            printf("\n[recall] [id=%lu] %s 撤回了一条私聊消息\n",
+                                   msg.recall_notify().msg_id(),
+                                   msg.recall_notify().from_uid().c_str());
                         printf("> ");
                         fflush(stdout);
                         break;
