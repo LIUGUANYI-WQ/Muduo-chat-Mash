@@ -17,7 +17,13 @@ ChatServer::ChatServer(EventLoop* loop, const InetAddress& listenAddr)
     : server_(loop, listenAddr, "ChatServer"),
       codec_(std::bind(&ChatServer::onEnvelope, this, _1, _2, _3)),
       loop_(loop),
-      threadPool_(4)
+      threadPool_([]() {
+          const char* env = std::getenv("THREAD_POOL_SIZE");
+          int n = env ? atoi(env) : 0;
+          if (n <= 0) n = std::thread::hardware_concurrency();
+          if (n <= 0) n = 4;
+          return n;
+      }())
 {
     const char* host = std::getenv("MYSQL_HOST");
     const char* user = std::getenv("MYSQL_USER");
