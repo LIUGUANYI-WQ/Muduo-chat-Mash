@@ -20,8 +20,8 @@ ChatServer::ChatServer(EventLoop* loop, const InetAddress& listenAddr)
       threadPool_([]() {
           const char* env = std::getenv("THREAD_POOL_SIZE");
           int n = env ? atoi(env) : 0;
-          if (n <= 0) n = std::thread::hardware_concurrency();
-          if (n <= 0) n = 4;
+          if (n <= 0) n = std::thread::hardware_concurrency() * 2;
+          if (n <= 0) n = 8;
           return n;
       }())
 {
