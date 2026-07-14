@@ -174,10 +174,14 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
                 bool ok = redis_.getToken(uid, cachedToken) && cachedToken == token;
 
                 UserInfo info;
-                if (ok) info = db_.getUserInfo(uid);
+                std::vector<UserInfo> friends;
+                if (ok) {
+                    info = db_.getUserInfo(uid);
+                    friends = db_.getFriendList(uid);
+                }
 
                 auto* ioLoop = conn->getLoop();
-                ioLoop->runInLoop([this, conn, uid, token, ok, info]() {
+                ioLoop->runInLoop([this, conn, uid, token, ok, info, friends]() {
                     if (ok) {
                         Session s;
                         s.uid = uid;
@@ -185,6 +189,11 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
                         s.authenticated = true;
                         conn->setContext(s);
                         users_[uid] = conn;
+
+                        // 缓存好友列表
+                        for (const auto& f : friends)
+                            friendships_[uid].insert(f.uid);
+
                         LOG_INFO << "User " << uid << " reconnected via token (Redis)";
 
                         chat::ServerMessage reply;
@@ -196,6 +205,9 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
                         reply.mutable_login_resp()->set_server_time(
                             Timestamp::now().microSecondsSinceEpoch());
                         codec_.sendServerMessage(conn, reply);
+
+                        // 推送好友列表
+                        sendFriendList(conn);
                     } else {
                         sendError(conn, 6, "invalid token");
                     }
@@ -227,8 +239,9 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
             return;
         }
 
-        // 查用户资料
+        // 查用户资料 + 好友列表
         UserInfo info = db_.getUserInfo(uid);
+        auto friends = db_.getFriendList(uid);
 
         // 生成 token，写入 Redis
         static thread_local std::mt19937 gen(std::random_device{}());
@@ -241,7 +254,7 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
         redis_.cacheToken(uid, token, 3600);
 
         auto* ioLoop = conn->getLoop();
-        ioLoop->runInLoop([this, conn, uid, token, info]() {
+        ioLoop->runInLoop([this, conn, uid, token, info, friends]() {
             Session s;
             s.uid = uid;
             s.token = token;
@@ -249,17 +262,25 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
             conn->setContext(s);
             users_[uid] = conn;
 
+            // 缓存好友列表到内存
+            for (const auto& f : friends)
+                friendships_[uid].insert(f.uid);
+
             LOG_INFO << "User " << uid << " logged in, token=" << token;
 
-            chat::ServerMessage reply;
-            reply.mutable_login_resp()->set_ok(true);
-            reply.mutable_login_resp()->set_token(token);
-            reply.mutable_login_resp()->set_nickname(info.nickname);
-            reply.mutable_login_resp()->set_email(info.email);
-            reply.mutable_login_resp()->set_avatar_url(info.avatarUrl);
-            reply.mutable_login_resp()->set_server_time(
+            // 登录响应
+            chat::ServerMessage loginReply;
+            loginReply.mutable_login_resp()->set_ok(true);
+            loginReply.mutable_login_resp()->set_token(token);
+            loginReply.mutable_login_resp()->set_nickname(info.nickname);
+            loginReply.mutable_login_resp()->set_email(info.email);
+            loginReply.mutable_login_resp()->set_avatar_url(info.avatarUrl);
+            loginReply.mutable_login_resp()->set_server_time(
                 Timestamp::now().microSecondsSinceEpoch());
-            codec_.sendServerMessage(conn, reply);
+            codec_.sendServerMessage(conn, loginReply);
+
+            // 推送好友列表
+            sendFriendList(conn);
         });
     });
 }
@@ -424,49 +445,125 @@ void ChatServer::handleJoinRoom(const TcpConnectionPtr& conn,
 }
 
 void ChatServer::handleFriendRequest(const TcpConnectionPtr& conn,
-                                  const chat::FriendRequest& req)
-{
-    friendships_[req.from_uid()].insert(req.to_uid());
-
-    auto it = users_.find(req.to_uid());
-    if (it != users_.end())
-    {
-        chat::ServerMessage reply;
-        chat::FriendRequest* fr = reply.mutable_friend_req();
-        fr->set_from_uid(req.from_uid());
-        fr->set_message(req.message());
-        codec_.sendServerMessage(it->second, reply);
-    }
-}
-
-void ChatServer::handleFriendResponse(const TcpConnectionPtr& conn,
-                                    const chat::FriendResponse& req)
-{
-    if (req.accepted())
-    {
-        friendships_[req.from_uid()].insert(req.to_uid());
-        friendships_[req.to_uid()].insert(req.from_uid());
-    }
-
-    auto it = users_.find(req.to_uid());
-    if (it != users_.end())
-    {
-        chat::ServerMessage reply;
-        chat::FriendResponse* fr = reply.mutable_friend_resp();
-        fr->set_from_uid(req.from_uid());
-        fr->set_accepted(req.accepted());
-        codec_.sendServerMessage(it->second, reply);
-    }
-}
-
-void ChatServer::handleFriendRemove(const TcpConnectionPtr& conn,
-                                  const chat::FriendRemove& req)
+                                   const chat::FriendRequest& req)
 {
     if (!isAuthenticated(conn))
         return;
     const string& uid = currentUid(conn);
-    friendships_[uid].erase(req.target_uid());
-    friendships_[req.target_uid()].erase(uid);
+
+    // MySQL 持久化
+    threadPool_.enqueue([this, conn, from = req.from_uid(), to = req.to_uid(), msg = req.message()]() {
+        db_.addFriendRequest(from, to, msg);
+
+        // 更新内存表
+        auto* ioLoop = conn->getLoop();
+        ioLoop->runInLoop([this, conn, from, to, msg]() {
+            friendships_[from].insert(to);
+            pending_friend_requests_.insert(from + ":" + to);
+
+            // 如果对方在线，实时推送
+            auto it = users_.find(to);
+            if (it != users_.end())
+            {
+                chat::ServerMessage reply;
+                chat::FriendRequest* fr = reply.mutable_friend_req();
+                fr->set_from_uid(from);
+                fr->set_message(msg);
+                codec_.sendServerMessage(it->second, reply);
+            }
+            // 离线：请求已存 MySQL，对方登录时通过 getPendingRequests 拉取
+        });
+    });
+}
+
+void ChatServer::handleFriendResponse(const TcpConnectionPtr& conn,
+                                     const chat::FriendResponse& req)
+{
+    if (!isAuthenticated(conn))
+        return;
+    const string& uid = currentUid(conn);
+
+    threadPool_.enqueue([this, conn, from = req.from_uid(), to = req.to_uid(), accepted = req.accepted()]() {
+        db_.respondFriendRequest(from, to, accepted);
+
+        auto* ioLoop = conn->getLoop();
+        ioLoop->runInLoop([this, conn, from, to, accepted]() {
+            if (accepted)
+            {
+                friendships_[from].insert(to);
+                friendships_[to].insert(from);
+            }
+            pending_friend_requests_.erase(from + ":" + to);
+
+            // 通知请求方
+            auto it = users_.find(to);
+            if (it != users_.end())
+            {
+                chat::ServerMessage reply;
+                chat::FriendResponse* fr = reply.mutable_friend_resp();
+                fr->set_from_uid(from);
+                fr->set_accepted(accepted);
+                codec_.sendServerMessage(it->second, reply);
+            }
+
+            // 双方都在线则刷新好友列表
+            sendFriendList(conn);
+            auto uit = users_.find(from);
+            if (uit != users_.end())
+                sendFriendList(uit->second);
+        });
+    });
+}
+
+void ChatServer::handleFriendRemove(const TcpConnectionPtr& conn,
+                                   const chat::FriendRemove& req)
+{
+    if (!isAuthenticated(conn))
+        return;
+    const string& uid = currentUid(conn);
+
+    threadPool_.enqueue([this, conn, uid, target = req.target_uid()]() {
+        db_.removeFriends(uid, target);
+
+        auto* ioLoop = conn->getLoop();
+        ioLoop->runInLoop([this, conn, uid, target]() {
+            friendships_[uid].erase(target);
+            friendships_[target].erase(uid);
+
+            // 通知对方
+            auto it = users_.find(target);
+            if (it != users_.end())
+            {
+                chat::ServerMessage reply;
+                chat::FriendRemove* fr = reply.mutable_friend_remove();
+                fr->set_target_uid(uid);
+                codec_.sendServerMessage(it->second, reply);
+                sendFriendList(it->second);
+            }
+            sendFriendList(conn);
+        });
+    });
+}
+
+void ChatServer::handleFriendList(const TcpConnectionPtr& conn)
+{
+    sendFriendList(conn);
+}
+
+void ChatServer::sendFriendList(const TcpConnectionPtr& conn)
+{
+    const string& uid = currentUid(conn);
+
+    chat::ServerMessage reply;
+    chat::FriendList* fl = reply.mutable_friend_list();
+    for (const auto& fuid : friendships_[uid])
+    {
+        chat::FriendInfo* fi = fl->add_friends();
+        fi->set_uid(fuid);
+        fi->set_nickname(fuid);
+        fi->set_online(users_.find(fuid) != users_.end());
+    }
+    codec_.sendServerMessage(conn, reply);
 }
 
 void ChatServer::handleRecall(const TcpConnectionPtr& conn,

@@ -2,6 +2,7 @@
 #define MUDUO_CHAT_DB_H
 
 #include <string>
+#include <vector>
 #include <mutex>
 #include <condition_variable>
 #include <queue>
@@ -42,6 +43,15 @@ public:
     bool verifyUser(const std::string& uid, const std::string& passwd);
     bool userExists(const std::string& uid);
     UserInfo getUserInfo(const std::string& uid);
+
+    // 好友系统
+    bool addFriendRequest(const std::string& from, const std::string& to,
+                          const std::string& message);
+    bool respondFriendRequest(const std::string& from, const std::string& to,
+                              bool accepted);
+    bool removeFriends(const std::string& uid1, const std::string& uid2);
+    std::vector<UserInfo> getFriendList(const std::string& uid);
+    std::vector<std::string> getPendingRequests(const std::string& uid);
 
     int activeConns() const { return activeConns_.load(); }
     int idleConns() const;

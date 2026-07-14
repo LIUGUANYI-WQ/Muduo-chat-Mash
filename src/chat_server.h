@@ -52,12 +52,14 @@ public:
     void handleFriendResponse(const muduo::net::TcpConnectionPtr& conn,
                               const chat::FriendResponse& req);
     void handleFriendRemove(const muduo::net::TcpConnectionPtr& conn,
-                            const chat::FriendRemove& req);
+                             const chat::FriendRemove& req);
+    void handleFriendList(const muduo::net::TcpConnectionPtr& conn);
     void handleRecall(const muduo::net::TcpConnectionPtr& conn,
                       const chat::RecallMessage& req);
 
     void sendError(const muduo::net::TcpConnectionPtr& conn,
                    uint32_t code, const muduo::string& reason);
+    void sendFriendList(const muduo::net::TcpConnectionPtr& conn);
 
     muduo::net::TcpServer server_;
     ChatCodec codec_;
