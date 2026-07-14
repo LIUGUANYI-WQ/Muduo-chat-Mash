@@ -265,15 +265,14 @@ bool MySQLPool::addFriendRequest(const std::string& from, const std::string& to,
     return ok;
 }
 
-bool MySQLPool::respondFriendRequest(const std::string& from, const std::string& to,
+bool MySQLPool::respondFriendRequest(const std::string& requester, const std::string& responder,
                                       bool accepted) {
     MYSQL* conn = getConnection();
     if (!conn) return false;
 
     int status = accepted ? 1 : 2;
-    // 更新好友请求状态
     std::string sql = "UPDATE friendships SET status = " + std::to_string(status)
-        + " WHERE requester_uid = '" + escape(conn, from) + "' AND target_uid = '" + escape(conn, to) + "'";
+        + " WHERE requester_uid = '" + escape(conn, requester) + "' AND target_uid = '" + escape(conn, responder) + "'";
     bool ok = mysql_query(conn, sql.c_str()) == 0;
     if (!ok) {
         fprintf(stderr, "respondFriendRequest failed: %s\n", mysql_error(conn));
@@ -281,10 +280,9 @@ bool MySQLPool::respondFriendRequest(const std::string& from, const std::string&
         return false;
     }
 
-    // 如果接受，插入反向关系
     if (accepted) {
         std::string insertSql = "INSERT IGNORE INTO friendships (requester_uid, target_uid, status) VALUES ('"
-            + escape(conn, to) + "', '" + escape(conn, from) + "', 1)";
+            + escape(conn, responder) + "', '" + escape(conn, requester) + "', 1)";
         mysql_query(conn, insertSql.c_str());
     }
 

@@ -119,12 +119,12 @@ public:
         sendEnvelope(env);
     }
 
-    void sendFriendResp(const std::string& from, const std::string& to, bool accept)
+    void sendFriendResp(const std::string& requester, bool accept)
     {
         chat::Envelope env;
         auto resp = env.mutable_friend_resp();
-        resp->set_from_uid(from);
-        resp->set_to_uid(to);
+        resp->set_from_uid(currentUid_);   // 响应者（自己）
+        resp->set_to_uid(requester);        // 原请求方
         resp->set_accepted(accept);
         sendEnvelope(env);
     }
@@ -434,15 +434,14 @@ int main(int argc, char* argv[])
                 }
                 else if (choice == "6")
                 {
-                    std::string from = readLine("好友ID: ");
-                    std::string to = readLine("你的ID: ");
+                    std::string from = readLine("对方ID (请求方的ID): ");
                     std::string accept = readLine("同意? (1=是/0=否): ");
-                    if (from.empty() || to.empty())
+                    if (from.empty())
                     {
                         printf("ID不能为空\n");
                         continue;
                     }
-                    client.sendFriendResp(from, to, accept == "1");
+                    client.sendFriendResp(from, accept == "1");
                 }
                 else if (choice == "7")
                 {

@@ -477,38 +477,42 @@ void ChatServer::handleFriendRequest(const TcpConnectionPtr& conn,
 }
 
 void ChatServer::handleFriendResponse(const TcpConnectionPtr& conn,
-                                     const chat::FriendResponse& req)
+                                      const chat::FriendResponse& req)
 {
     if (!isAuthenticated(conn))
         return;
-    const string& uid = currentUid(conn);
 
-    threadPool_.enqueue([this, conn, from = req.from_uid(), to = req.to_uid(), accepted = req.accepted()]() {
-        db_.respondFriendRequest(from, to, accepted);
+    // from_uid = 响应者(Bob), to_uid = 原请求者(Alice)
+    string responder = req.from_uid();
+    string requester = req.to_uid();
+
+    threadPool_.enqueue([this, conn, requester, responder, accepted = req.accepted()]() {
+        db_.respondFriendRequest(requester, responder, accepted);
 
         auto* ioLoop = conn->getLoop();
-        ioLoop->runInLoop([this, conn, from, to, accepted]() {
+        ioLoop->runInLoop([this, conn, requester, responder, accepted]() {
             if (accepted)
             {
-                friendships_[from].insert(to);
-                friendships_[to].insert(from);
+                friendships_[requester].insert(responder);
+                friendships_[responder].insert(requester);
             }
-            pending_friend_requests_.erase(from + ":" + to);
+            pending_friend_requests_.erase(requester + ":" + responder);
 
-            // 通知请求方
-            auto it = users_.find(to);
+            // 通知原请求方(Alice)
+            auto it = users_.find(requester);
             if (it != users_.end())
             {
                 chat::ServerMessage reply;
                 chat::FriendResponse* fr = reply.mutable_friend_resp();
-                fr->set_from_uid(from);
+                fr->set_from_uid(responder);  // 响应者是 Bob
+                fr->set_to_uid(requester);     // 通知的是 Alice
                 fr->set_accepted(accepted);
                 codec_.sendServerMessage(it->second, reply);
             }
 
-            // 双方都在线则刷新好友列表
+            // 双方刷新好友列表
             sendFriendList(conn);
-            auto uit = users_.find(from);
+            auto uit = users_.find(requester);
             if (uit != users_.end())
                 sendFriendList(uit->second);
         });
