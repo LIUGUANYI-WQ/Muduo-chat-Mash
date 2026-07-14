@@ -5,6 +5,9 @@ release-cpp11/
 release-install-cpp11/
 benchmark/login_bench_linux
 
+# ─── 会话交接文档 ───
+HANDOFF.md
+
 # ─── Protobuf 生成文件（由 protoc 生成，不要入库）──
 proto/*.pb.cc
 proto/*.pb.h

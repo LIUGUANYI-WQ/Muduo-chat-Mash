@@ -11,6 +11,14 @@
 #include <thread>
 #include <mysql/mysql.h>
 
+struct UserInfo {
+    std::string uid;
+    std::string nickname;
+    std::string email;
+    std::string avatarUrl;
+    bool exists = false;
+};
+
 struct ConnInfo {
     std::string host;
     int port;
@@ -28,9 +36,12 @@ public:
               const std::string& user, const std::string& password,
               const std::string& database, int poolSize = 0);
 
-    bool registerUser(const std::string& uid, const std::string& passwd);
+    bool registerUser(const std::string& uid, const std::string& passwd,
+                       const std::string& nickname = "",
+                       const std::string& email = "");
     bool verifyUser(const std::string& uid, const std::string& passwd);
     bool userExists(const std::string& uid);
+    UserInfo getUserInfo(const std::string& uid);
 
     int activeConns() const { return activeConns_.load(); }
     int idleConns() const;

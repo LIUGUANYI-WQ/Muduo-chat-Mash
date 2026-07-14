@@ -1,6 +1,15 @@
 #include "src/db.h"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+
+static std::string escape(MYSQL* conn, const std::string& s) {
+    if (s.empty()) return "";
+    std::string out(s.size() * 2 + 1, '\0');
+    unsigned long len = mysql_real_escape_string(conn, &out[0], s.data(), s.size());
+    out.resize(len);
+    return out;
+}
 
 MySQLPool::~MySQLPool() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -133,7 +142,9 @@ int MySQLPool::idleConns() const {
     return idle_.size();
 }
 
-bool MySQLPool::registerUser(const std::string& uid, const std::string& passwd) {
+bool MySQLPool::registerUser(const std::string& uid, const std::string& passwd,
+                              const std::string& nickname,
+                              const std::string& email) {
     MYSQL* conn = getConnection();
     if (!conn) return false;
 
@@ -151,7 +162,11 @@ bool MySQLPool::registerUser(const std::string& uid, const std::string& passwd) 
         return false;
     }
 
-    std::string sql = "INSERT INTO users (uid, passwd) VALUES ('" + uid + "', SHA2('" + passwd + "', 256))";
+    std::string nick = nickname.empty() ? uid : escape(conn, nickname);
+    std::string mail = escape(conn, email);
+    std::string escapedUid = escape(conn, uid);
+    std::string sql = "INSERT INTO users (uid, nickname, email, passwd) VALUES ('"
+        + escapedUid + "', '" + nick + "', '" + mail + "', SHA2('" + passwd + "', 256))";
     bool ok = (mysql_query(conn, sql.c_str()) == 0);
     if (!ok) {
         fprintf(stderr, "Register failed: %s\n", mysql_error(conn));
@@ -186,6 +201,12 @@ bool MySQLPool::verifyUser(const std::string& uid, const std::string& passwd) {
         }
     }
 
+    // 验证成功，更新 last_login
+    if (ok) {
+        std::string updateSql = "UPDATE users SET last_login = NOW() WHERE uid = '" + uid + "'";
+        mysql_query(conn, updateSql.c_str());
+    }
+
     returnConnection(conn);
     return ok;
 }
@@ -205,4 +226,28 @@ bool MySQLPool::userExists(const std::string& uid) {
     }
     returnConnection(conn);
     return exists;
+}
+
+UserInfo MySQLPool::getUserInfo(const std::string& uid) {
+    UserInfo info;
+    MYSQL* conn = getConnection();
+    if (!conn) return info;
+
+    std::string sql = "SELECT uid, nickname, email, avatar_url FROM users WHERE uid = '" + uid + "'";
+    if (mysql_query(conn, sql.c_str()) == 0) {
+        MYSQL_RES* result = mysql_store_result(conn);
+        if (result) {
+            MYSQL_ROW row = mysql_fetch_row(result);
+            if (row) {
+                info.uid = row[0] ? row[0] : "";
+                info.nickname = row[1] ? row[1] : "";
+                info.email = row[2] ? row[2] : "";
+                info.avatarUrl = row[3] ? row[3] : "";
+                info.exists = true;
+            }
+            mysql_free_result(result);
+        }
+    }
+    returnConnection(conn);
+    return info;
 }

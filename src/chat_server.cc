@@ -173,8 +173,11 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
                 string cachedToken;
                 bool ok = redis_.getToken(uid, cachedToken) && cachedToken == token;
 
+                UserInfo info;
+                if (ok) info = db_.getUserInfo(uid);
+
                 auto* ioLoop = conn->getLoop();
-                ioLoop->runInLoop([this, conn, uid, token, ok]() {
+                ioLoop->runInLoop([this, conn, uid, token, ok, info]() {
                     if (ok) {
                         Session s;
                         s.uid = uid;
@@ -187,6 +190,9 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
                         chat::ServerMessage reply;
                         reply.mutable_login_resp()->set_ok(true);
                         reply.mutable_login_resp()->set_token(token);
+                        reply.mutable_login_resp()->set_nickname(info.nickname);
+                        reply.mutable_login_resp()->set_email(info.email);
+                        reply.mutable_login_resp()->set_avatar_url(info.avatarUrl);
                         reply.mutable_login_resp()->set_server_time(
                             Timestamp::now().microSecondsSinceEpoch());
                         codec_.sendServerMessage(conn, reply);
@@ -221,6 +227,9 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
             return;
         }
 
+        // 查用户资料
+        UserInfo info = db_.getUserInfo(uid);
+
         // 生成 token，写入 Redis
         static thread_local std::mt19937 gen(std::random_device{}());
         static const char hex[] = "0123456789abcdef";
@@ -232,7 +241,7 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
         redis_.cacheToken(uid, token, 3600);
 
         auto* ioLoop = conn->getLoop();
-        ioLoop->runInLoop([this, conn, uid, token]() {
+        ioLoop->runInLoop([this, conn, uid, token, info]() {
             Session s;
             s.uid = uid;
             s.token = token;
@@ -245,6 +254,9 @@ void ChatServer::handleLogin(const TcpConnectionPtr& conn,
             chat::ServerMessage reply;
             reply.mutable_login_resp()->set_ok(true);
             reply.mutable_login_resp()->set_token(token);
+            reply.mutable_login_resp()->set_nickname(info.nickname);
+            reply.mutable_login_resp()->set_email(info.email);
+            reply.mutable_login_resp()->set_avatar_url(info.avatarUrl);
             reply.mutable_login_resp()->set_server_time(
                 Timestamp::now().microSecondsSinceEpoch());
             codec_.sendServerMessage(conn, reply);
@@ -287,9 +299,11 @@ void ChatServer::handleRegister(const TcpConnectionPtr& conn,
 
     string uid = req.uid();
     string passwd = req.passwd();
+    string nickname = req.nickname();
+    string email = req.email();
 
     // MySQL userExists + registerUser 放到线程池
-    threadPool_.enqueue([this, conn, uid, passwd]() {
+    threadPool_.enqueue([this, conn, uid, passwd, nickname, email]() {
         if (db_.userExists(uid)) {
             auto* ioLoop = conn->getLoop();
             ioLoop->runInLoop([this, conn]() {
@@ -301,7 +315,7 @@ void ChatServer::handleRegister(const TcpConnectionPtr& conn,
             return;
         }
 
-        if (!db_.registerUser(uid, passwd)) {
+        if (!db_.registerUser(uid, passwd, nickname, email)) {
             auto* ioLoop = conn->getLoop();
             ioLoop->runInLoop([this, conn]() {
                 chat::ServerMessage reply;

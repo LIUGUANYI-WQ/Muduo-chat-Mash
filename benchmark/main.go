@@ -8,6 +8,8 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -295,13 +297,40 @@ func printStats(success int64, latencies []time.Duration, elapsed time.Duration)
 	fmt.Println("Done.")
 }
 
+func wslAddr(addr string) string {
+	out, err := exec.Command("wsl.exe", "hostname", "-I").Output()
+	if err != nil {
+		fmt.Printf("[warn] wsl.exe hostname -I failed (%v), fallback to %s\n", err, addr)
+		return addr
+	}
+	wslIP := strings.Fields(string(out))[0]
+	if wslIP == "" {
+		return addr
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	if host == "127.0.0.1" || host == "localhost" || host == "0.0.0.0" {
+		replaced := wslIP + ":" + strings.SplitN(addr, ":", 2)[1]
+		fmt.Printf("[wsl] %s → %s (WSL2 IP 直连，绕过 localhost 端口转发)\n", addr, replaced)
+		return replaced
+	}
+	return addr
+}
+
 func main() {
 	mode := flag.String("mode", "login", "mode: login, register, or token")
 	addr := flag.String("addr", "127.0.0.1:8000", "server address")
 	concurrency := flag.Int("c", 50, "concurrent connections")
 	total := flag.Int("n", 10000, "total requests")
 	fixed := flag.Bool("fixed", false, "use fixed uids (bench0~bench999) for login")
+	wsl := flag.Bool("wsl", false, "auto-detect WSL2 IP (bypass localhost forwarding)")
 	flag.Parse()
+
+	if *wsl {
+		*addr = wslAddr(*addr)
+	}
 
 	fmt.Printf("Login QPS Benchmark\n")
 	fmt.Printf("Mode:     %s\n", *mode)

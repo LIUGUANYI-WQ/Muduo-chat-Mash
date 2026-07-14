@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package chat;
 
+option go_package = "benchmark/pb";
+
 message LoginRequest {
     string uid = 1;
     string passwd = 2;
@@ -13,11 +15,16 @@ message LoginResponse {
     string token = 2;
     string reason = 3;
     uint64 server_time = 4;
+    string nickname = 5;
+    string email = 6;
+    string avatar_url = 7;
 }
 
 message RegisterRequest {
     string uid = 1;
     string passwd = 2;
+    string nickname = 3;
+    string email = 4;
 }
 
 message RegisterResponse {

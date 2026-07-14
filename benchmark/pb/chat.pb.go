@@ -87,6 +87,9 @@ type LoginResponse struct {
 	Token         string                 `protobuf:"bytes,2,opt,name=token,proto3" json:"token,omitempty"`
 	Reason        string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
 	ServerTime    uint64                 `protobuf:"varint,4,opt,name=server_time,json=serverTime,proto3" json:"server_time,omitempty"`
+	Nickname      string                 `protobuf:"bytes,5,opt,name=nickname,proto3" json:"nickname,omitempty"`
+	Email         string                 `protobuf:"bytes,6,opt,name=email,proto3" json:"email,omitempty"`
+	AvatarUrl     string                 `protobuf:"bytes,7,opt,name=avatar_url,json=avatarUrl,proto3" json:"avatar_url,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -149,10 +152,33 @@ func (x *LoginResponse) GetServerTime() uint64 {
 	return 0
 }
 
+func (x *LoginResponse) GetNickname() string {
+	if x != nil {
+		return x.Nickname
+	}
+	return ""
+}
+
+func (x *LoginResponse) GetEmail() string {
+	if x != nil {
+		return x.Email
+	}
+	return ""
+}
+
+func (x *LoginResponse) GetAvatarUrl() string {
+	if x != nil {
+		return x.AvatarUrl
+	}
+	return ""
+}
+
 type RegisterRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Uid           string                 `protobuf:"bytes,1,opt,name=uid,proto3" json:"uid,omitempty"`
 	Passwd        string                 `protobuf:"bytes,2,opt,name=passwd,proto3" json:"passwd,omitempty"`
+	Nickname      string                 `protobuf:"bytes,3,opt,name=nickname,proto3" json:"nickname,omitempty"`
+	Email         string                 `protobuf:"bytes,4,opt,name=email,proto3" json:"email,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -197,6 +223,20 @@ func (x *RegisterRequest) GetUid() string {
 func (x *RegisterRequest) GetPasswd() string {
 	if x != nil {
 		return x.Passwd
+	}
+	return ""
+}
+
+func (x *RegisterRequest) GetNickname() string {
+	if x != nil {
+		return x.Nickname
+	}
+	return ""
+}
+
+func (x *RegisterRequest) GetEmail() string {
+	if x != nil {
+		return x.Email
 	}
 	return ""
 }
@@ -1454,16 +1494,22 @@ const file_chat_proto_rawDesc = "" +
 	"\fLoginRequest\x12\x10\n" +
 	"\x03uid\x18\x01 \x01(\tR\x03uid\x12\x16\n" +
 	"\x06passwd\x18\x02 \x01(\tR\x06passwd\x12\x14\n" +
-	"\x05token\x18\x03 \x01(\tR\x05token\"n\n" +
+	"\x05token\x18\x03 \x01(\tR\x05token\"\xbf\x01\n" +
 	"\rLoginResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x14\n" +
 	"\x05token\x18\x02 \x01(\tR\x05token\x12\x16\n" +
 	"\x06reason\x18\x03 \x01(\tR\x06reason\x12\x1f\n" +
 	"\vserver_time\x18\x04 \x01(\x04R\n" +
-	"serverTime\";\n" +
+	"serverTime\x12\x1a\n" +
+	"\bnickname\x18\x05 \x01(\tR\bnickname\x12\x14\n" +
+	"\x05email\x18\x06 \x01(\tR\x05email\x12\x1d\n" +
+	"\n" +
+	"avatar_url\x18\a \x01(\tR\tavatarUrl\"m\n" +
 	"\x0fRegisterRequest\x12\x10\n" +
 	"\x03uid\x18\x01 \x01(\tR\x03uid\x12\x16\n" +
-	"\x06passwd\x18\x02 \x01(\tR\x06passwd\":\n" +
+	"\x06passwd\x18\x02 \x01(\tR\x06passwd\x12\x1a\n" +
+	"\bnickname\x18\x03 \x01(\tR\bnickname\x12\x14\n" +
+	"\x05email\x18\x04 \x01(\tR\x05email\":\n" +
 	"\x10RegisterResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12\x16\n" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"7\n" +
@@ -1557,7 +1603,7 @@ const file_chat_proto_rawDesc = "" +
 	"friendList\x129\n" +
 	"\rfriend_remove\x18  \x01(\v2\x12.chat.FriendRemoveH\x00R\ffriendRemove\x12+\n" +
 	"\x05error\x18c \x01(\v2\x13.chat.ErrorResponseH\x00R\x05errorB\t\n" +
-	"\apayloadb\x06proto3"
+	"\apayloadB\x0eZ\fbenchmark/pbb\x06proto3"
 
 var (
 	file_chat_proto_rawDescOnce sync.Once
