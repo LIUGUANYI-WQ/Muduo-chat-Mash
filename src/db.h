@@ -6,7 +6,6 @@
 #include <mutex>
 #include <condition_variable>
 #include <queue>
-#include <vector>
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -45,52 +44,18 @@ public:
     MySQLPool() = default;
     ~MySQLPool();
 
-    bool init(const std::string& host, int port,
-              const std::string& user, const std::string& password,
-              const std::string& database, int poolSize = 0);
+    bool init(const std::string& host, const std::string& user,
+              const std::string& password, const std::string& database,
+              int port = 3306, int poolSize = 0);
 
-    bool registerUser(const std::string& uid, const std::string& passwd,
-                       const std::string& nickname = "",
-                       const std::string& email = "");
-    bool verifyUser(const std::string& uid, const std::string& passwd);
-    bool userExists(const std::string& uid);
-    UserInfo getUserInfo(const std::string& uid);
-
-    // 好友系统
-    bool addFriendRequest(const std::string& from, const std::string& to,
-                          const std::string& message);
-    bool respondFriendRequest(const std::string& requester, const std::string& responder,
-                              bool accepted);
-    bool removeFriends(const std::string& uid1, const std::string& uid2);
-    std::vector<UserInfo> getFriendList(const std::string& uid);
-    std::vector<std::string> getPendingRequests(const std::string& uid);
-
-    // 消息系统
-    int64_t storeMessage(const std::string& from, const std::string& to,
-                         const std::string& room, const std::string& content);
-    MessageInfo getMessage(int64_t msg_id);
-    bool recallMessage(int64_t msg_id, const std::string& uid);
-
-    // 离线消息
-    bool addOfflineMessage(const std::string& target_uid, int64_t msg_id);
-    std::vector<MessageInfo> getUndeliveredMessages(const std::string& uid);
-    bool markMessagesDelivered(const std::string& uid);
-
-    // 房间系统
-    int64_t createRoom(const std::string& name, const std::string& creator);
-    int64_t getRoomIdByName(const std::string& name);
-    bool roomExists(const std::string& name);
-    bool addRoomMember(int64_t room_id, const std::string& uid);
-    bool removeRoomMember(int64_t room_id, const std::string& uid);
-    std::vector<std::string> getRoomMembers(int64_t room_id);
+    MYSQL* getConnection();
+    void returnConnection(MYSQL* conn);
 
     int activeConns() const { return activeConns_.load(); }
     int idleConns() const;
 
 private:
     MYSQL* createConnection();
-    MYSQL* getConnection();
-    void returnConnection(MYSQL* conn);
     bool ensureTable(MYSQL* conn);
     bool pingConnection(MYSQL* conn);
 

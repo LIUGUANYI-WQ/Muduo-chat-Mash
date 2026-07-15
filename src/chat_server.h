@@ -4,32 +4,30 @@
 #include "muduo/net/TcpServer.h"
 #include "muduo/net/EventLoop.h"
 #include "muduo/base/noncopyable.h"
-#include "src/codec.h"
-#include "src/db.h"
-#include "src/redis.h"
-#include "src/thread_pool.h"
+#include "muduo/base/ThreadPool.h"
+#include "codec.h"
+#include "session_manager.h"
+#include "room_manager.h"
+#include "service/login_service.h"
+#include "service/chat_service.h"
+#include "service/friend_service.h"
+#include "service/room_service.h"
 #include "chat.pb.h"
 
-#include <map>
-#include <set>
-#include <unordered_map>
-
-class ChatServer : muduo::noncopyable
-{
+class ChatServer : muduo::noncopyable {
 public:
     ChatServer(muduo::net::EventLoop* loop,
-               const muduo::net::InetAddress& listenAddr);
+               const muduo::net::InetAddress& listenAddr,
+               LoginService& loginService,
+               ChatService& chatService,
+               FriendService& friendService,
+               RoomService& roomService,
+               const std::string& node_id = "node-1");
 
     void start();
     void setThreadNum(int numThreads) { server_.setThreadNum(numThreads); }
 
-    struct Session {
-        muduo::string uid;
-        muduo::string token;
-        bool authenticated = false;
-    };
-
- private:
+private:
     void onConnection(const muduo::net::TcpConnectionPtr& conn);
     void onEnvelope(const muduo::net::TcpConnectionPtr& conn,
                     const chat::Envelope& env,
@@ -60,18 +58,24 @@ public:
     void sendError(const muduo::net::TcpConnectionPtr& conn,
                    uint32_t code, const muduo::string& reason);
     void sendFriendList(const muduo::net::TcpConnectionPtr& conn);
+    void sendOfflineMessages(const muduo::net::TcpConnectionPtr& conn,
+                             const std::vector<MessageInfo>& messages);
+    void sendPendingRequests(const muduo::net::TcpConnectionPtr& conn,
+                             const std::vector<std::string>& requests);
 
     muduo::net::TcpServer server_;
     ChatCodec codec_;
     muduo::net::EventLoop* loop_;
-    MySQLPool db_;
-    RedisCache redis_;
-    ThreadPool threadPool_;
 
-    std::unordered_map<muduo::string, muduo::net::TcpConnectionPtr> users_;
-    std::map<muduo::string, std::set<muduo::string>> rooms_;
-    std::map<muduo::string, std::set<muduo::string>> friendships_;
-    std::set<muduo::string> pending_friend_requests_;
+    LoginService& loginService_;
+    ChatService& chatService_;
+    FriendService& friendService_;
+    RoomService& roomService_;
+
+    SessionManager sessionManager_;
+    RoomManager roomManager_;
+    muduo::ThreadPool threadPool_;
+    std::string node_id_;
 };
 
 #endif
